@@ -1,62 +1,62 @@
 # fcitx5-predict-ja
 
-日本語予測変換システム。MCP Gateway経由で収集した会話履歴から予測候補を学習し、fcitx5上で入力補完を提供する。
+Japanese predictive input system. Learns prediction candidates from conversation history collected via MCP Gateway and provides input completion on fcitx5.
 
-## コンポーネント
+## Components
 
-| コンポーネント | 役割 |
+| Component | Role |
 |---|---|
-| `daemon/` | 予測変換デーモン（Java）— 知識ベース管理、LLMフィルタ、Mozc連携、HTTPサーバ |
-| `addon/` | fcitx5 C++アドオン（llm-ime）— ローマ字→ひらがな変換、IME入力処理、予測候補表示、LLM continuation UI |
-| `plugin/` | fcitx5通知アドオン（predict-ja-notifier） |
+| `daemon/` | Prediction daemon (Java) — knowledge base management, LLM filter, Mozc integration, HTTP server |
+| `addon/` | fcitx5 C++ addon (llm-ime) — romaji→hiragana conversion, IME input handling, prediction candidate display, LLM continuation UI |
+| `plugin/` | fcitx5 notification addon (predict-ja-notifier) |
 
-## 依存関係
+## Dependencies
 
-### デーモン
+### Daemon
 - Java 21+
-- [POJO-actor](../POJO-actor/) — アクターフレームワーク（`mvn install`しておくこと）
-- vLLMサーバ — フレーズフィルタ・continuation生成に使用
-- MCP Gateway — 会話履歴の集約（オプション）
+- [POJO-actor](../POJO-actor/) — actor framework (must be `mvn install`ed first)
+- vLLM server — used for phrase filtering and continuation generation
+- MCP Gateway — conversation history aggregation (optional)
 
-### C++アドオン
+### C++ Addon
 - fcitx5, libcurl, nlohmann-json
-- CMake 3.16+, C++17コンパイラ
+- CMake 3.16+, C++17 compiler
 
-## ビルド
+## Build
 
 ```bash
-# 1. POJO-actorをインストール（未インストールの場合）
+# 1. Install POJO-actor (if not already installed)
 cd ~/works/POJO-actor
 rm -rf target && mvn install
 
-# 2. デーモンをビルド
+# 2. Build the daemon
 cd ~/works/fcitx5-predict-ja/daemon
 rm -rf target && mvn package
 
-# 3. C++アドオンをビルド
+# 3. Build the C++ addon
 cd ~/works/fcitx5-predict-ja/addon
 mkdir -p build && cd build
 cmake .. && make -j$(nproc)
 ```
 
-## インストール
+## Install
 
-### デーモン
+### Daemon
 
-JARファイルを任意の場所に配置する。ビルド後のJARは `daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar`。
+Place the JAR file wherever you like. After build it is at `daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar`.
 
-### fcitx5アドオン（`llm-ime`）
+### fcitx5 Addon (`llm-ime`)
 
 ```bash
 sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/lib/x86_64-linux-gnu/fcitx5/
 sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/
-fcitx5 -r   # fcitx5を再起動
+fcitx5 -r   # restart fcitx5
 ```
 
-## 起動
+## Running
 
 ```bash
-# デーモン起動
+# Start the daemon
 java -jar daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar \
   --vllm-url http://<vllm-host>:8000 \
   --vllm-model <model-name> \
@@ -67,97 +67,117 @@ java -jar daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar \
   --ime-learning false
 ```
 
-### 起動オプション
+### Options
 
-| オプション | デフォルト | 説明 |
+| Option | Default | Description |
 |---|---|---|
-| `--vllm-url` | なし（必須） | vLLMサーバのURL |
-| `--vllm-model` | なし（必須） | 使用するモデル名 |
-| `--port` | `8190` | デーモンのHTTPポート |
-| `--curate-interval` | `1` | 知識ベース整理の間隔（分） |
-| `--gateway-url` | なし | MCP GatewayのURL（指定しなければポーリングなし） |
-| `--gateway-poll` | `60` | Gatewayポーリング間隔（秒） |
-| `--ime-learning` | `true` | IME確定テキストから学習するか |
+| `--vllm-url` | (required) | vLLM server URL |
+| `--vllm-model` | (required) | Model name to use |
+| `--port` | `8190` | Daemon HTTP port |
+| `--curate-interval` | `1` | Knowledge base curation interval (minutes) |
+| `--gateway-url` | (none) | MCP Gateway URL (no polling if omitted) |
+| `--gateway-poll` | `60` | Gateway polling interval (seconds) |
+| `--ime-learning` | `true` | Whether to learn from IME committed text |
 
-## キーバインド
+## Keybindings
 
-### 通常入力モード（ローマ字入力中）
+### Input Mode (romaji input)
 
-| キー | 動作 |
+| Key | Action |
 |---|---|
-| ローマ字入力 | ひらがなに変換してプリエディットに表示 |
-| `Space` | Mozc文節変換を開始 |
-| `Enter` | ひらがなのまま確定 |
-| `Ctrl+Enter` | LLM全文変換（一括変換） |
-| `Backspace` | 1文字削除 |
-| `Escape` | 入力をキャンセル |
+| Romaji keys | Convert to hiragana and display in preedit |
+| `Space` | Start Mozc segment conversion |
+| `Enter` | Commit as hiragana |
+| `Ctrl+Enter` | LLM full-sentence conversion |
+| `Backspace` | Delete one character |
+| `Escape` | Cancel input |
 
-### 変換モード（Space押下後）
+### Converting Mode (after pressing Space)
 
-| キー | 動作 |
+| Key | Action |
 |---|---|
-| `Space` / `↓` | 次の変換候補 |
-| `↑` | 前の変換候補 |
-| `Enter` | 選択中の変換を確定 |
-| `Escape` | 変換をキャンセル（ひらがなに戻る） |
-| `Shift+→` | 文節を伸ばす |
-| `Shift+←` | 文節を縮める |
-| `→` | 次の文節へ移動 |
-| `←` | 前の文節へ移動 |
+| `Space` / `Down` | Next conversion candidate |
+| `Up` | Previous conversion candidate |
+| `Enter` | Commit selected conversion |
+| `Escape` | Cancel conversion (return to hiragana) |
+| `Shift+Right` | Extend segment |
+| `Shift+Left` | Shrink segment |
+| `Right` | Move to next segment |
+| `Left` | Move to previous segment |
 
-### 予測入力モード（プリエディット中、ひらがな5文字以上）
+### Prediction Mode (during preedit, 5+ hiragana characters)
 
-入力中のひらがなで知識ベースを前方一致検索し、候補を自動表示する。
+Performs prefix matching against the knowledge base using the current hiragana input and automatically displays candidates.
 
-| キー | 動作 |
+| Key | Action |
 |---|---|
-| `↓` / `↑` | 予測候補をナビゲート |
-| `Tab` / `Enter` | 予測候補を選択・確定 |
-| `Escape` | 予測候補を閉じる |
-| そのまま入力継続 | 予測候補を無視して通常入力 |
+| `Down` / `Up` | Navigate prediction candidates |
+| `Tab` | Select and commit prediction candidate |
+| `Escape` | Dismiss prediction candidates |
+| Continue typing | Ignore predictions and continue normal input |
 
-### LLM continuation モード（入力バッファが空の状態）
+### LLM Continuation Mode (empty input buffer)
 
-確定済みテキストの「続き」をLLMに生成させる。
+Generates a continuation of the committed text using the LLM.
 
-| キー | 動作 |
+| Key | Action |
 |---|---|
-| `Ctrl+Tab` | LLMにcontinuation要求（非同期、UIはブロックしない） |
-| `↓` / `↑` | continuation候補をナビゲート |
-| `Tab` / `Enter` | continuation候補を選択・確定 |
-| `Escape` | continuation候補を閉じる |
+| `Ctrl+Tab` | Request LLM continuation (async, does not block UI) |
+| `Down` / `Up` | Navigate continuation candidates |
+| `Tab` / `Enter` | Select and commit continuation candidate |
+| `Escape` | Dismiss continuation candidates |
 
-## APIエンドポイント
+## API Endpoints
 
-| エンドポイント | メソッド | 説明 |
+| Endpoint | Method | Description |
 |---|---|---|
-| `/api/predict?prefix=<ひらがな>&limit=<n>` | GET | 知識ベースの前方一致検索 |
-| `/api/continue` | POST | LLM continuation生成（`{"context":"...", "n":5}`） |
-| `/api/segment-convert` | POST | Mozc文節変換（`{"input":"ひらがな"}`） |
-| `/api/record` | POST | IME確定テキストの記録（`--ime-learning true`時のみ有効） |
-| `/api/health` | GET | ヘルスチェック |
+| `/api/predict?prefix=<hiragana>&limit=<n>` | GET | Prefix search on the knowledge base |
+| `/api/continue` | POST | LLM continuation generation (`{"context":"...", "n":5}`) |
+| `/api/segment-convert` | POST | Mozc segment conversion (`{"input":"hiragana"}`) |
+| `/api/record` | POST | Record IME committed text (only effective when `--ime-learning true`) |
+| `/api/health` | GET | Health check |
 
-## アーキテクチャ
+## Architecture
 
 ```
                           ┌─────────────────┐     ┌──────────┐
 ┌──────────────┐          │ predict-ja      │     │  vLLM    │
-│  fcitx5      │          │ daemon (:8190)  │────▶│  server  │
-│  llm-ime     │─────────▶│                 │     │          │
+│  fcitx5      │          │ daemon (:8190)  │────>│  server  │
+│  llm-ime     │─────────>│                 │     │          │
 │  (C++ addon) │          │  ┌───────────┐  │     └──────────┘
 └──────────────┘          │  │KnowledgeBase│ │
                           │  │   (H2 DB)  │ │     ┌──────────┐
-                          │  └───────────┘  │     │  MCP     │
-                          │                 │◀────│ Gateway  │
-                          │  ┌───────────┐  │     │ (:8888)  │
-                          │  │   Mozc    │  │     └──────────┘
-                          │  │  server   │  │
-                          │  └───────────┘  │
+                          │                 │     │  MCP     │
+                          │  ┌───────────┐  │<────│ Gateway  │
+                          │  │   Mozc    │  │     │ (:8888)  │
+                          │  │  server   │  │     └──────────┘
                           └─────────────────┘
 ```
 
-### データフロー
+### Data Flow
 
-1. **知識ベース蓄積**: Gateway → ポーリング → 会話テキストを句読点で分割 → LLMフィルタ（重複除去） → kuromoji読み付け → H2 DB保存
-2. **予測入力**: ひらがな5文字以上入力 → `/api/predict` で前方一致検索 → fcitx5候補ウィンドウに表示
-3. **LLM continuation**: `Ctrl+Tab` → 確定済みテキスト + Gateway会話履歴をLLMに送信 → 続きの候補を非同期で表示
+1. **Knowledge base accumulation**: Gateway → polling → split conversation text at sentence boundaries → LLM filter (deduplication) → kuromoji reading assignment → save to H2 DB
+2. **Prediction input**: 5+ hiragana characters typed → `/api/predict` prefix search → display in fcitx5 candidate window
+3. **LLM continuation**: `Ctrl+Tab` → send committed text + Gateway conversation history to LLM → display continuation candidates asynchronously
+
+## Testing
+
+### Unit Tests
+
+```bash
+# Daemon (Java)
+cd daemon && mvn test
+
+# C++ state machine
+cd addon/test
+g++ -std=c++17 -I../src -o test-state-machine \
+    test-state-machine.cpp ../src/input-state-machine.cpp && ./test-state-machine
+```
+
+### E2E Tests
+
+Requires the daemon to be running.
+
+```bash
+./test-api.sh
+```

@@ -1,7 +1,6 @@
 #include "http-client.h"
 #include <fcitx-utils/log.h>
 #include <fcitx/addonfactory.h>
-#include <fstream>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodengine.h>
@@ -296,12 +295,6 @@ private:
         if (event.isRelease()) return;
         auto key = event.key();
 
-        {
-            std::ofstream log("/tmp/llm-ime-keys.log", std::ios::app);
-            log << "input key: sym=" << key.sym()
-                << " state=" << static_cast<uint32_t>(key.states()) << std::endl;
-        }
-
         // Ctrl+Tab with empty buffer -> request LLM continuation (async)
         if (key.check(Key(FcitxKey_Tab, KeyState::Ctrl)) && state->buffer_.size() == 0) {
             fetchContinuationAsync(ic);
@@ -315,6 +308,55 @@ private:
                 event.filterAndAccept();
                 return;
             }
+        }
+
+        // Tab with input + prediction candidates -> select prediction
+        if (key.check(Key(FcitxKey_Tab)) && state->buffer_.size() > 0
+            && !predictionCandidates_.empty()) {
+            int idx = (predictionIndex_ < 0) ? 0 : predictionIndex_;
+            if (idx < (int)predictionCandidates_.size()) {
+                std::string selected = predictionCandidates_[idx];
+                // Clear state BEFORE commit to prevent preedit hiragana leak
+                predictionCandidates_.clear();
+                predictionIndex_ = -1;
+                state->buffer_.clear();
+                state->fullHiragana_.clear();
+                auto &panel = ic->inputPanel();
+                panel.reset();
+                // panel.reset() does NOT clear clientPreedit_ — must clear explicitly
+                Text emptyPreedit;
+                panel.setClientPreedit(emptyPreedit);
+                ic->updatePreedit();
+                // Now commit the prediction candidate
+                ic->commitString(selected);
+                committedContext_ += selected;
+                if (committedContext_.size() > 500) {
+                    committedContext_ = committedContext_.substr(
+                        committedContext_.size() - 500);
+                }
+                ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+            }
+            event.filterAndAccept();
+            return;
+        }
+
+        // Down arrow with input -> navigate prediction candidates
+        if (key.check(Key(FcitxKey_Down)) && state->buffer_.size() > 0
+            && !predictionCandidates_.empty()) {
+            predictionIndex_ = (predictionIndex_ + 1) % (int)predictionCandidates_.size();
+            showPredictionWithSelection(ic, state);
+            event.filterAndAccept();
+            return;
+        }
+
+        // Up arrow with input -> navigate prediction candidates
+        if (key.check(Key(FcitxKey_Up)) && state->buffer_.size() > 0
+            && !predictionCandidates_.empty()) {
+            predictionIndex_ = (predictionIndex_ <= 0)
+                ? (int)predictionCandidates_.size() - 1 : predictionIndex_ - 1;
+            showPredictionWithSelection(ic, state);
+            event.filterAndAccept();
+            return;
         }
 
         // Ctrl+Enter with input -> LLM full-sentence conversion
@@ -371,12 +413,6 @@ private:
                              KeyEvent &event) {
         if (event.isRelease()) return;
         auto key = event.key();
-        {
-            std::ofstream log("/tmp/llm-ime-keys.log", std::ios::app);
-            log << "converting key: sym=" << key.sym()
-                << " state=" << static_cast<uint32_t>(key.states()) << std::endl;
-        }
-
         // Ctrl+Enter -> LLM full-sentence re-conversion (must be before Enter)
         if (key.check(Key(FcitxKey_Return, KeyState::Ctrl))) {
             startLlmConversion(ic, state);
@@ -751,12 +787,12 @@ private:
 
         // Record conversion history asynchronously (fire and forget)
         if (hiragana != result) {
-            try {
-                json req = {{"input", hiragana}, {"output", result}};
-                httpClient_.post("/api/record", req);
-            } catch (...) {
-                // Ignore record failures
-            }
+            std::thread([this, hiragana, result]() {
+                try {
+                    json req = {{"input", hiragana}, {"output", result}};
+                    httpClient_.post("/api/record", req);
+                } catch (...) {}
+            }).detach();
         }
 
         // Track committed text for continuation
@@ -790,6 +826,9 @@ private:
 
         auto &panel = ic->inputPanel();
         panel.reset();
+        Text emptyPreedit;
+        panel.setClientPreedit(emptyPreedit);
+        ic->updatePreedit();
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
         return true;
     }
@@ -831,6 +870,16 @@ private:
 
     // Store continuation candidates and show in UI (called on main thread)
     void showContinuationCandidates(InputContext *ic, const json &resp) {
+        // Guard: if user has started typing since the async request,
+        // discard the continuation results to avoid stealing input focus
+        auto *state = ic->propertyFor(&factory_);
+        if (state->buffer_.size() > 0 || state->converting_) {
+            auto &panel = ic->inputPanel();
+            panel.reset();
+            ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+            return;
+        }
+
         continuationCandidates_.clear();
         continuationIndex_ = 0;
 
@@ -921,8 +970,11 @@ private:
     }
 
     // Query predict daemon for prefix-matched candidates and show them
-    void fetchPredictions(InputContext *ic, LlmImeState * /*state*/,
+    void fetchPredictions(InputContext *ic, LlmImeState *state,
                           const std::string &hiragana) {
+        predictionCandidates_.clear();
+        predictionIndex_ = -1;
+
         try {
             std::string query = "/api/predict?prefix=" + urlEncode(hiragana) +
                                 "&limit=5";
@@ -930,23 +982,43 @@ private:
             json resp = predictClient_.get(query);
             if (!resp.is_array() || resp.empty()) return;
 
-            auto &panel = ic->inputPanel();
-            auto candidateList = std::make_unique<CommonCandidateList>();
-            candidateList->setPageSize(5);
-            candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
             for (int i = 0; i < (int)resp.size(); i++) {
                 if (resp[i].contains("candidate")) {
-                    candidateList->append<LlmCandidate>(
-                        Text(resp[i]["candidate"].get<std::string>()),
-                        0, i);
+                    predictionCandidates_.push_back(
+                        resp[i]["candidate"].get<std::string>());
                 }
             }
-            if (candidateList->totalSize() > 0) {
-                panel.setCandidateList(std::move(candidateList));
+
+            if (!predictionCandidates_.empty()) {
+                showPredictionWithSelection(ic, state);
             }
         } catch (const std::exception &) {
             // Predict daemon unavailable — silently ignore
         }
+    }
+
+    // Show prediction candidates with current selection highlighted
+    void showPredictionWithSelection(InputContext *ic, LlmImeState *state) {
+        auto &panel = ic->inputPanel();
+        // Keep preedit but replace candidate list
+        auto candidateList = std::make_unique<CommonCandidateList>();
+        candidateList->setPageSize(5);
+        candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
+        for (int i = 0; i < (int)predictionCandidates_.size(); i++) {
+            std::string label = (i == predictionIndex_) ? "▶ " : "  ";
+            candidateList->append<LlmCandidate>(
+                Text(label + predictionCandidates_[i]), 0, i);
+        }
+        if (candidateList->totalSize() > 0) {
+            panel.setCandidateList(std::move(candidateList));
+            if (predictionIndex_ >= 0) {
+                Text aux;
+                aux.append(predictionCandidates_[predictionIndex_],
+                           TextFormatFlag::HighLight);
+                panel.setAuxDown(aux);
+            }
+        }
+        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
     }
 
     void updateConversionDisplay(InputContext *ic, LlmImeState *state) {
@@ -996,9 +1068,16 @@ private:
         state->converting_ = false;
         state->llmMode_ = false;
         state->fullHiragana_.clear();
+        predictionCandidates_.clear();
+        predictionIndex_ = -1;
+        continuationCandidates_.clear();
+        continuationIndex_ = 0;
 
         auto &panel = ic->inputPanel();
         panel.reset();
+        // panel.reset() does NOT clear clientPreedit_ — must clear explicitly
+        Text emptyPreedit;
+        panel.setClientPreedit(emptyPreedit);
         ic->updatePreedit();
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
     }
@@ -1011,6 +1090,8 @@ private:
     std::string committedContext_;  // rolling context for continuation
     std::vector<std::string> continuationCandidates_;  // current continuation candidates
     int continuationIndex_ = 0;    // currently highlighted continuation candidate
+    std::vector<std::string> predictionCandidates_;  // current prediction candidates from KB
+    int predictionIndex_ = -1;     // -1 = no selection, 0+ = selected index
 };
 
 class LlmImeEngineFactory : public AddonFactory {
