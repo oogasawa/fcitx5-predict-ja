@@ -43,6 +43,21 @@ public class Analyzer {
         enricher.tell(e -> e.enrich(batch));
     }
 
+    /**
+     * Accept raw text (e.g., from LLM Console) and queue it for enrichment.
+     * The text is treated as context for generating related phrases.
+     * No reading is available, so the direct-to-KB path in LlmEnricher
+     * will filter it out (empty reading). Only LLM-generated entries
+     * with proper reading/candidate pairs will be stored.
+     */
+    public void analyzeRawText(String text) {
+        if (text == null || text.isBlank()) return;
+        buffer.add(new CommitRecord("", text, ""));
+        if (buffer.size() >= BATCH_SIZE) {
+            flush();
+        }
+    }
+
     public int getBufferSize() {
         return buffer.size();
     }

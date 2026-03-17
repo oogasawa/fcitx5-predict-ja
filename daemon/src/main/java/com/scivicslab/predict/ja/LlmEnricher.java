@@ -35,9 +35,13 @@ public class LlmEnricher {
      * Take a batch of committed text and ask vLLM to generate related phrases.
      */
     public void enrich(List<Analyzer.CommitRecord> batch) {
-        // First, add the committed text directly to knowledge base
+        // First, add the committed text directly to knowledge base (if valid)
         for (var record : batch) {
-            kbActor.tell(kb -> kb.addEntry(record.reading(), record.output(), "ime"));
+            String normalized = EntryFilter.filter(record.reading(), record.output());
+            if (normalized != null) {
+                final String nr = normalized;
+                kbActor.tell(kb -> kb.addEntry(nr, record.output(), "ime"));
+            }
         }
 
         // Build a prompt to generate related phrases
@@ -113,8 +117,9 @@ public class LlmEnricher {
             if (parts.length == 2) {
                 String reading = parts[0].trim();
                 String candidate = parts[1].trim();
-                if (!reading.isEmpty() && !candidate.isEmpty()) {
-                    kbActor.tell(kb -> kb.addEntry(reading, candidate, "llm"));
+                String normalized = EntryFilter.filter(reading, candidate);
+                if (normalized != null) {
+                    kbActor.tell(kb -> kb.addEntry(normalized, candidate, "llm"));
                     count++;
                 }
             }

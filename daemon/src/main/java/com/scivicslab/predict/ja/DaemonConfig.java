@@ -10,7 +10,10 @@ public record DaemonConfig(
         String vllmUrl,
         String vllmModel,
         int curateIntervalMinutes,
-        int maxDictEntries
+        int maxDictEntries,
+        String gatewayUrl,
+        int gatewayPollSeconds,
+        boolean imeLearning
 ) {
 
     public static DaemonConfig fromArgsOrDefaults(String[] args) {
@@ -26,9 +29,13 @@ public record DaemonConfig(
         String vllmModel = stringArg(args, "--vllm-model", "default");
         int curateInterval = intArg(args, "--curate-interval", 5);
         int maxEntries = intArg(args, "--max-dict-entries", 3000);
+        String gatewayUrl = stringArg(args, "--gateway-url", "");
+        int gatewayPoll = intArg(args, "--gateway-poll", 300);
+        boolean imeLearning = boolArg(args, "--ime-learning", true);
 
         return new DaemonConfig(port, dataDir, mozcUserDictPath, vllmUrl,
-                vllmModel, curateInterval, maxEntries);
+                vllmModel, curateInterval, maxEntries,
+                gatewayUrl, gatewayPoll, imeLearning);
     }
 
     private static String stringArg(String[] args, String name, String defaultValue) {
@@ -43,6 +50,15 @@ public record DaemonConfig(
             if (args[i].equals(name)) {
                 try { return Integer.parseInt(args[i + 1]); }
                 catch (NumberFormatException e) { return defaultValue; }
+            }
+        }
+        return defaultValue;
+    }
+
+    private static boolean boolArg(String[] args, String name, boolean defaultValue) {
+        for (int i = 0; i < args.length - 1; i++) {
+            if (args[i].equals(name)) {
+                return Boolean.parseBoolean(args[i + 1]);
             }
         }
         return defaultValue;
