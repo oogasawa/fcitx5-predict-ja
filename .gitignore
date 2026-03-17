@@ -4,3 +4,4 @@ daemon/dependency-reduced-pom.xml
 
 # C++ / CMake
 plugin/build/
+addon/build/

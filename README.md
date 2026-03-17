@@ -7,15 +7,20 @@
 | コンポーネント | 役割 |
 |---|---|
 | `daemon/` | 予測変換デーモン（Java）— 知識ベース管理、LLMフィルタ、Mozc連携、HTTPサーバ |
-| `fcitx5-llm-ime` | fcitx5 C++アドオン（別リポジトリ）— IME入力処理、予測候補表示 |
+| `addon/` | fcitx5 C++アドオン（llm-ime）— ローマ字→ひらがな変換、IME入力処理、予測候補表示、LLM continuation UI |
+| `plugin/` | fcitx5通知アドオン（predict-ja-notifier） |
 
 ## 依存関係
 
+### デーモン
 - Java 21+
 - [POJO-actor](../POJO-actor/) — アクターフレームワーク（`mvn install`しておくこと）
 - vLLMサーバ — フレーズフィルタ・continuation生成に使用
 - MCP Gateway — 会話履歴の集約（オプション）
-- `fcitx5-llm-ime` — fcitx5上で候補を表示するC++アドオン（別リポジトリ）
+
+### C++アドオン
+- fcitx5, libcurl, nlohmann-json
+- CMake 3.16+, C++17コンパイラ
 
 ## ビルド
 
@@ -28,8 +33,8 @@ rm -rf target && mvn install
 cd ~/works/fcitx5-predict-ja/daemon
 rm -rf target && mvn package
 
-# 3. fcitx5-llm-imeをビルド（別リポジトリ）
-cd ~/works/fcitx5-llm-ime
+# 3. C++アドオンをビルド
+cd ~/works/fcitx5-predict-ja/addon
 mkdir -p build && cd build
 cmake .. && make -j$(nproc)
 ```
@@ -40,11 +45,11 @@ cmake .. && make -j$(nproc)
 
 JARファイルを任意の場所に配置する。ビルド後のJARは `daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar`。
 
-### fcitx5アドオン（`fcitx5-llm-ime`）
+### fcitx5アドオン（`llm-ime`）
 
 ```bash
-sudo cp ~/works/fcitx5-llm-ime/build/lib/llm-ime.so /usr/lib/x86_64-linux-gnu/fcitx5/
-sudo cp ~/works/fcitx5-llm-ime/build/lib/llm-ime.so /usr/local/lib/fcitx5/
+sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/lib/x86_64-linux-gnu/fcitx5/
+sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/
 fcitx5 -r   # fcitx5を再起動
 ```
 
@@ -135,20 +140,20 @@ java -jar daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar \
 ## アーキテクチャ
 
 ```
-┌──────────────┐     ┌─────────────────┐     ┌──────────┐
-│  fcitx5      │     │ predict-ja      │     │  vLLM    │
-│  llm-ime     │────▶│ daemon (:8190)  │────▶│  server  │
-│  (C++ addon) │     │                 │     │          │
-└──────────────┘     │  ┌───────────┐  │     └──────────┘
-                     │  │KnowledgeBase│ │
-                     │  │   (H2 DB)  │ │     ┌──────────┐
-                     │  └───────────┘  │     │  MCP     │
-                     │                 │◀────│ Gateway  │
-                     │  ┌───────────┐  │     │ (:8888)  │
-                     │  │   Mozc    │  │     └──────────┘
-                     │  │  server   │  │
-                     │  └───────────┘  │
-                     └─────────────────┘
+                          ┌─────────────────┐     ┌──────────┐
+┌──────────────┐          │ predict-ja      │     │  vLLM    │
+│  fcitx5      │          │ daemon (:8190)  │────▶│  server  │
+│  llm-ime     │─────────▶│                 │     │          │
+│  (C++ addon) │          │  ┌───────────┐  │     └──────────┘
+└──────────────┘          │  │KnowledgeBase│ │
+                          │  │   (H2 DB)  │ │     ┌──────────┐
+                          │  └───────────┘  │     │  MCP     │
+                          │                 │◀────│ Gateway  │
+                          │  ┌───────────┐  │     │ (:8888)  │
+                          │  │   Mozc    │  │     └──────────┘
+                          │  │  server   │  │
+                          │  └───────────┘  │
+                          └─────────────────┘
 ```
 
 ### データフロー
