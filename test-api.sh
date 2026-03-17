@@ -84,25 +84,76 @@ resp=$(curl -s -X POST "$BASE/api/continue" \
     -d '{"context":"","n":3}')
 check "returns array (possibly empty)" "assert isinstance(d, list)" "$resp"
 
-# 8. Flush
-echo "[8] POST /api/flush"
+# --- Ctrl+Tab Continuation Flow (E2E) ---
+# These tests verify the full API contract that the C++ addon depends on
+# when the user presses Ctrl+Tab to trigger LLM continuation.
+
+# 8. Continuation returns correct structure for C++ addon parsing
+echo "[8] POST /api/continue - response structure for Ctrl+Tab"
+resp=$(curl -s -X POST "$BASE/api/continue" \
+    -H "Content-Type: application/json" \
+    -d '{"context":"インストールを実行して","n":5}')
+check "returns array" "assert isinstance(d, list)" "$resp"
+check "returns non-empty array" "assert len(d) > 0" "$resp"
+check "each entry has 'text' field (addon reads this)" \
+    "assert all('text' in e for e in d)" "$resp"
+check "text values are non-empty strings" \
+    "assert all(isinstance(e['text'], str) and len(e['text']) > 0 for e in d)" "$resp"
+
+# 9. Continuation returns requested number of candidates
+echo "[9] POST /api/continue - candidate count matches request"
+resp=$(curl -s -X POST "$BASE/api/continue" \
+    -H "Content-Type: application/json" \
+    -d '{"context":"テストが全部通った","n":3}')
+check "returns exactly n or fewer candidates" \
+    "assert isinstance(d, list) and 0 < len(d) <= 3" "$resp"
+
+# 10. Continuation candidates are diverse (not all identical)
+echo "[10] POST /api/continue - candidates are diverse"
+resp=$(curl -s -X POST "$BASE/api/continue" \
+    -H "Content-Type: application/json" \
+    -d '{"context":"このプロジェクトは","n":5}')
+check "at least 2 distinct candidates" \
+    "texts = [e['text'] for e in d]; assert len(set(texts)) >= 2" "$resp"
+
+# 11. Continuation with empty context returns empty (no crash)
+echo "[11] POST /api/continue - empty context returns empty"
+resp=$(curl -s -X POST "$BASE/api/continue" \
+    -H "Content-Type: application/json" \
+    -d '{"context":"","n":3}')
+check "returns empty array for empty context" "assert isinstance(d, list) and len(d) == 0" "$resp"
+
+# 12. Continuation with n=1 returns single candidate
+echo "[12] POST /api/continue - n=1 single candidate"
+resp=$(curl -s -X POST "$BASE/api/continue" \
+    -H "Content-Type: application/json" \
+    -d '{"context":"明日の会議は","n":1}')
+check "returns exactly 1 candidate" \
+    "assert isinstance(d, list) and len(d) == 1" "$resp"
+check "single candidate has text field" \
+    "assert d[0].get('text','')" "$resp"
+
+# --- End Ctrl+Tab Continuation Flow ---
+
+# 13. Flush
+echo "[13] POST /api/flush"
 resp=$(curl -s -X POST "$BASE/api/flush")
 check "returns flushed status" "assert d['status'] == 'flushed'" "$resp"
 
-# 9. Curate
-echo "[9] POST /api/curate"
+# 14. Curate
+echo "[14] POST /api/curate"
 resp=$(curl -s -X POST "$BASE/api/curate")
 check "returns curating status" "assert d['status'] == 'curating'" "$resp"
 
-# 10. Record (with ime-learning disabled)
-echo "[10] POST /api/record"
+# 15. Record (with ime-learning disabled)
+echo "[15] POST /api/record"
 resp=$(curl -s -X POST "$BASE/api/record" \
     -H "Content-Type: application/json" \
     -d '{"input":"test","output":"テスト"}')
 check "returns valid JSON" "assert isinstance(d, dict)" "$resp"
 
-# 11. Predict returns valid candidate structure for selection
-echo "[11] GET /api/predict - candidate structure for Tab select"
+# 16. Predict returns valid candidate structure for selection
+echo "[16] GET /api/predict - candidate structure for Tab select"
 resp=$(curl -s "$BASE/api/predict?prefix=%E3%81%AF%E3%81%84%E3%81%91%E3%81%84&limit=1")
 check "returns array for single-candidate request" "assert isinstance(d, list)" "$resp"
 check "each entry has 'candidate' field for commit" \
@@ -112,18 +163,18 @@ check "each entry has 'reading' field" \
 check "candidate != reading (prediction is converted form)" \
     "assert all(e.get('candidate','') != e.get('reading','') for e in d) if len(d) > 0 else True" "$resp"
 
-# 12. Predict with limit=1 returns at most 1 result
-echo "[12] GET /api/predict - limit=1 returns at most 1"
+# 17. Predict with limit=1 returns at most 1 result
+echo "[17] GET /api/predict - limit=1 returns at most 1"
 resp=$(curl -s "$BASE/api/predict?prefix=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1&limit=1")
 check "returns at most 1 entry" "assert isinstance(d, list) and len(d) <= 1" "$resp"
 
-# 13. Predict with very short prefix returns empty (< 5 hiragana chars triggers no fetch)
-echo "[13] GET /api/predict - short prefix behavior"
+# 18. Predict with very short prefix returns empty (< 5 hiragana chars triggers no fetch)
+echo "[18] GET /api/predict - short prefix behavior"
 resp=$(curl -s "$BASE/api/predict?prefix=%E3%81%82&limit=5")
 check "returns array (possibly empty for short prefix)" "assert isinstance(d, list)" "$resp"
 
-# 14. Wrong method on segment-convert
-echo "[14] GET /api/segment-convert (wrong method)"
+# 19. Wrong method on segment-convert
+echo "[19] GET /api/segment-convert (wrong method)"
 code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/segment-convert")
 check_status "returns 405" "405" "$code"
 

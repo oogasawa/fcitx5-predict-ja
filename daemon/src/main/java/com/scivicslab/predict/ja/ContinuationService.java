@@ -75,6 +75,7 @@ public class ContinuationService {
                     ルール:
                     - 上の文に直接つながる続きだけを書く
                     - 上の文を繰り返さない
+                    - 各候補は異なる意図・方向性にする（例: 肯定/否定/質問/条件付き/話題転換）
                     - 1行に1つずつ
                     - 番号や説明は不要
                     """, n, currentInput);
@@ -92,6 +93,7 @@ public class ContinuationService {
                     ルール:
                     - 上の文に直接つながる続きだけを書く
                     - 上の文を繰り返さない
+                    - 各候補は異なる意図・方向性にする（例: 肯定/否定/質問/条件付き/話題転換）
                     - 1行に1つずつ
                     - 番号や説明は不要
                     """, conversation, currentInput, n);
@@ -99,7 +101,9 @@ public class ContinuationService {
 
         try {
             String response = callVllm(prompt);
-            return parseResponse(response);
+            List<String> results = parseResponse(response);
+            // LLM may return more than requested; truncate to n
+            return results.size() > n ? results.subList(0, n) : results;
         } catch (Exception e) {
             LOG.warning("Continuation generation failed: " + e.getMessage());
             return List.of();

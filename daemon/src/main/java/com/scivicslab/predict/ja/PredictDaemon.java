@@ -155,13 +155,11 @@ public class PredictDaemon {
             }
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             String context = extractJsonString(body, "context");
-            int n = 5;
-            try {
-                String ns = extractJsonString(body, "n");
-                if (ns != null) n = Integer.parseInt(ns);
-            } catch (NumberFormatException ignored) {}
+            int n = extractJsonInt(body, "n", 5);
+            LOG.info("/api/continue called: context=[" + (context != null ? context.substring(0, Math.min(context.length(), 50)) : "null") + "] n=" + n);
 
             List<String> candidates = continuationService.generate(context, n);
+            LOG.info("/api/continue returning " + candidates.size() + " candidates");
 
             StringBuilder json = new StringBuilder("[");
             for (int i = 0; i < candidates.size(); i++) {
@@ -259,6 +257,35 @@ public class PredictDaemon {
      * Extract a string value from a simple JSON object.
      * E.g. extractJsonString({"input":"abc","n":5}, "input") returns "abc".
      */
+    /**
+     * Extract an integer value from a simple JSON object.
+     * Handles both {"n":5} (unquoted) and {"n":"5"} (quoted).
+     */
+    static int extractJsonInt(String json, String key, int defaultValue) {
+        String pattern = "\"" + key + "\"";
+        int idx = json.indexOf(pattern);
+        if (idx < 0) return defaultValue;
+        idx = json.indexOf(":", idx + pattern.length());
+        if (idx < 0) return defaultValue;
+        // Skip whitespace after colon
+        int start = idx + 1;
+        while (start < json.length() && json.charAt(start) == ' ') start++;
+        if (start >= json.length()) return defaultValue;
+        // If quoted, strip quotes
+        if (json.charAt(start) == '"') {
+            int end = json.indexOf("\"", start + 1);
+            if (end < 0) return defaultValue;
+            try { return Integer.parseInt(json.substring(start + 1, end)); }
+            catch (NumberFormatException e) { return defaultValue; }
+        }
+        // Unquoted number
+        int end = start;
+        while (end < json.length() && Character.isDigit(json.charAt(end))) end++;
+        if (end == start) return defaultValue;
+        try { return Integer.parseInt(json.substring(start, end)); }
+        catch (NumberFormatException e) { return defaultValue; }
+    }
+
     private static String extractJsonString(String json, String key) {
         String pattern = "\"" + key + "\"";
         int idx = json.indexOf(pattern);

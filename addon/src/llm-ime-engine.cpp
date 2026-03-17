@@ -377,6 +377,12 @@ private:
         if (key.check(Key(FcitxKey_Return)) && state->buffer_.size() > 0) {
             std::string hiragana = romajiToHiragana(state->buffer_.userInput());
             ic->commitString(hiragana);
+            // Track committed text for continuation
+            committedContext_ += hiragana;
+            if (committedContext_.size() > 500) {
+                committedContext_ = committedContext_.substr(
+                    committedContext_.size() - 500);
+            }
             resetState(ic, state);
             event.filterAndAccept();
             return;

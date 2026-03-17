@@ -47,10 +47,11 @@ Place the JAR file wherever you like. After build it is at `daemon/target/fcitx5
 
 ### fcitx5 Addon (`llm-ime`)
 
+ビルド済みのSOファイルを`/usr/local/lib/fcitx5/`にコピーし、fcitx5をデーモンモードで再起動します。`/usr/lib/x86_64-linux-gnu/fcitx5/llm-ime.so`はここへのシンボリックリンクになっているため、コピー先は`/usr/local/lib/fcitx5/`だけで構いません。
+
 ```bash
-sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/lib/x86_64-linux-gnu/fcitx5/
-sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/
-fcitx5 -r   # restart fcitx5
+sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/llm-ime.so
+fcitx5 -r -d
 ```
 
 ## Running
