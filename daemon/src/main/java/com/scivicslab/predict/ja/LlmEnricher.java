@@ -6,12 +6,14 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * Queries vLLM to generate related phrases from committed text,
- * then adds them to the knowledge base.
+ * Uses LLM to filter and consolidate candidate phrases before storing
+ * in the knowledge base. The LLM does NOT generate phrases — it selects
+ * and deduplicates from phrases extracted by kuromoji.
  */
 public class LlmEnricher {
 
@@ -21,6 +23,7 @@ public class LlmEnricher {
     private final String vllmUrl;
     private final String model;
     private final HttpClient httpClient;
+    private final ReadingResolver readingResolver;
 
     public LlmEnricher(ActorRef<KnowledgeBase> kbActor, String vllmUrl, String model) {
         this.kbActor = kbActor;
@@ -29,62 +32,58 @@ public class LlmEnricher {
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
+        this.readingResolver = new ReadingResolver();
     }
 
     /**
-     * Take a batch of committed text and ask vLLM to generate related phrases.
+     * Filter and consolidate a list of raw candidate phrases using LLM.
+     * Similar expressions are merged, useless fragments are dropped.
+     * Only the survivors get stored in the knowledge base.
      */
-    public void enrich(List<Analyzer.CommitRecord> batch) {
-        // First, add the committed text directly to knowledge base (if valid)
-        for (var record : batch) {
-            String normalized = EntryFilter.filter(record.reading(), record.output());
-            if (normalized != null) {
-                final String nr = normalized;
-                kbActor.tell(kb -> kb.addEntry(nr, record.output(), "ime"));
-            }
-        }
+    public void filterAndStore(List<String> rawCandidates) {
+        if (rawCandidates.isEmpty()) return;
 
-        // Build a prompt to generate related phrases
-        StringBuilder contextBuilder = new StringBuilder();
-        for (var record : batch) {
-            contextBuilder.append(record.output()).append(" ");
-        }
-        String context = contextBuilder.toString().trim();
+        LOG.info("Filtering " + rawCandidates.size() + " candidates via LLM");
 
-        if (context.length() < 5) return; // Too short to be useful
-
-        String prompt = buildPrompt(context);
+        String prompt = buildFilterPrompt(rawCandidates);
         try {
             String response = callVllm(prompt);
             parseAndStore(response);
         } catch (Exception e) {
-            LOG.warning("LLM enrichment failed: " + e.getMessage());
+            LOG.warning("LLM filtering failed: " + e.getMessage());
+            // Fallback: store all candidates without filtering
+            storeWithoutFilter(rawCandidates);
         }
     }
 
-    private String buildPrompt(String context) {
-        return String.format("""
-                Given the following Japanese text that a user recently typed:
-                "%s"
+    private String buildFilterPrompt(List<String> candidates) {
+        StringBuilder list = new StringBuilder();
+        for (String c : candidates) {
+            list.append("- ").append(c).append("\n");
+        }
 
-                Generate 10 related Japanese phrases that the user might type next.
-                Each line should be in the format: reading[TAB]phrase
-                Where reading is the hiragana reading and phrase is the kanji/katakana form.
-                Output ONLY the tab-separated list. No explanations, no numbering.
-                Example:
-                でぷろいめんと\tデプロイメント
-                ぽっど\tポッド
-                """, context);
+        return String.format("""
+                以下は日本語の予測変換候補として抽出されたフレーズのリストです:
+                ---
+                %s---
+
+                このリストから、予測変換の候補として不要なものだけを除外してください。
+                できるだけ多く残してください。除外するのは以下の場合だけです:
+                - 表現がほぼ同一のもの（例:「ビルドします」と「ビルドする」）→ 片方だけ残す
+                - 意味が似ているだけのものは両方残す（例:「ビルドします」と「ビルド成功です」は別の候補）
+                - 意味が不完全な断片（文として成立しないもの）
+                - 残したフレーズを1行に1つずつ出力してください
+                - フレーズはそのまま出力し、変更しないでください
+                - 番号や説明は不要です
+                """, list);
     }
 
     String callVllm(String prompt) throws Exception {
         String escapedPrompt = escapeJson(prompt);
         String body = "{\"model\":\"" + model
-                + "\",\"messages\":[{\"role\":\"user\",\"content\":" + escapedPrompt
-                + "}],\"max_tokens\":512,\"temperature\":0.7"
-                + ",\"chat_template_kwargs\":{\"enable_thinking\":false}}";
-
-        LOG.fine("Request body: " + body.substring(0, Math.min(body.length(), 200)));
+                + "\",\"chat_template_kwargs\":{\"enable_thinking\":false}"
+                + ",\"messages\":[{\"role\":\"user\",\"content\":" + escapedPrompt
+                + "}],\"max_tokens\":512,\"temperature\":0.3}";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(vllmUrl + "/v1/chat/completions"))
@@ -92,13 +91,10 @@ public class LlmEnricher {
                 .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))
                 .build();
 
-        LOG.fine("Sending request to: " + vllmUrl + "/v1/chat/completions");
-
         HttpResponse<String> response = httpClient.send(request,
                 HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
-            LOG.fine("vLLM response body: " + response.body());
             throw new RuntimeException("vLLM returned " + response.statusCode());
         }
 
@@ -106,32 +102,46 @@ public class LlmEnricher {
     }
 
     private void parseAndStore(String response) {
-        LOG.fine("LLM response: " + response.substring(0, Math.min(response.length(), 500)));
-        String[] lines = response.split("\n");
+        String[] lines = response.split("\\n+");
         int count = 0;
         for (String line : lines) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty()) continue;
+            String candidate = line.trim().replaceFirst("^[\\d]+[.)\\s]+", "").replaceFirst("^[-・]\\s*", "").trim();
+            if (candidate.isEmpty()) continue;
 
-            String[] parts = trimmed.split("\t", 2);
-            if (parts.length == 2) {
-                String reading = parts[0].trim();
-                String candidate = parts[1].trim();
-                String normalized = EntryFilter.filter(reading, candidate);
-                if (normalized != null) {
-                    kbActor.tell(kb -> kb.addEntry(normalized, candidate, "llm"));
-                    count++;
-                }
+            String reading = readingResolver.resolve(candidate);
+            if (reading == null) {
+                LOG.fine("Could not resolve reading for: " + candidate);
+                continue;
+            }
+
+            String normalized = EntryFilter.filter(reading, candidate);
+            if (normalized != null) {
+                kbActor.tell(kb -> kb.addEntry(normalized, candidate, "harvest"));
+                count++;
             }
         }
-        LOG.info("Stored " + count + " entries from LLM enrichment");
+        LOG.info("Stored " + count + " entries after LLM filtering");
     }
 
     /**
-     * Extract the assistant message content from OpenAI-compatible JSON response.
+     * Fallback: store candidates without LLM filtering (when LLM is unavailable).
      */
+    private void storeWithoutFilter(List<String> candidates) {
+        int count = 0;
+        for (String candidate : candidates) {
+            String reading = readingResolver.resolve(candidate);
+            if (reading == null) continue;
+
+            String normalized = EntryFilter.filter(reading, candidate);
+            if (normalized != null) {
+                kbActor.tell(kb -> kb.addEntry(normalized, candidate, "harvest"));
+                count++;
+            }
+        }
+        LOG.info("Stored " + count + " entries without LLM filtering (fallback)");
+    }
+
     private String extractContent(String json) {
-        // Simple extraction without full JSON parsing
         int contentIdx = json.indexOf("\"content\"");
         if (contentIdx < 0) return "";
         int colonIdx = json.indexOf(":", contentIdx);

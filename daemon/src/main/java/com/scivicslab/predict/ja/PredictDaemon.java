@@ -6,9 +6,15 @@ import com.scivicslab.pojoactor.core.scheduler.Scheduler;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
@@ -64,10 +70,14 @@ public class PredictDaemon {
                 config.curateIntervalMinutes(), config.curateIntervalMinutes(),
                 TimeUnit.MINUTES);
 
+        // Continuation service (Smart Compose) — created early so Gateway can feed it
+        ContinuationService continuationService = new ContinuationService(
+                config.vllmUrl(), config.vllmModel());
+
         // MCP Gateway data source (optional, only if URL configured)
         if (config.gatewayUrl() != null && !config.gatewayUrl().isBlank()) {
             LlmConsoleSource consoleSource = new LlmConsoleSource(
-                    analyzer, config.gatewayUrl());
+                    analyzer, config.gatewayUrl(), continuationService);
             ActorRef<LlmConsoleSource> consoleActor = system.actorOf("llmConsole", consoleSource);
             scheduler.scheduleWithFixedDelay("gatewayPoll", consoleActor,
                     c -> c.poll(),
@@ -111,6 +121,101 @@ public class PredictDaemon {
             exchange.getResponseBody().write(resp);
             exchange.getResponseBody().close();
         });
+        // /api/predict?prefix=<hiragana>&limit=<n> — prefix search for candidates
+        httpServer.createContext("/api/predict", exchange -> {
+            Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+            String prefix = params.getOrDefault("prefix", "");
+            int limit = 10;
+            try { limit = Integer.parseInt(params.getOrDefault("limit", "10")); }
+            catch (NumberFormatException ignored) {}
+
+            List<KnowledgeBase.DictEntry> entries = kb.findByPrefix(prefix, limit);
+
+            StringBuilder json = new StringBuilder("[");
+            for (int i = 0; i < entries.size(); i++) {
+                if (i > 0) json.append(",");
+                var e = entries.get(i);
+                json.append("{\"reading\":\"").append(escapeJson(e.reading()))
+                    .append("\",\"candidate\":\"").append(escapeJson(e.candidate()))
+                    .append("\",\"score\":").append(e.score()).append("}");
+            }
+            json.append("]");
+
+            byte[] resp = json.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, resp.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(resp); }
+        });
+
+        // /api/continue — LLM continuation (Smart Compose)
+        httpServer.createContext("/api/continue", exchange -> {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(405, -1);
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String context = extractJsonString(body, "context");
+            int n = 5;
+            try {
+                String ns = extractJsonString(body, "n");
+                if (ns != null) n = Integer.parseInt(ns);
+            } catch (NumberFormatException ignored) {}
+
+            List<String> candidates = continuationService.generate(context, n);
+
+            StringBuilder json = new StringBuilder("[");
+            for (int i = 0; i < candidates.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append("{\"text\":\"").append(escapeJson(candidates.get(i))).append("\"}");
+            }
+            json.append("]");
+
+            byte[] resp = json.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, resp.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(resp); }
+        });
+
+        // /api/segment-convert — Mozc segmentation
+        MozcClient mozcClient = new MozcClient();
+        httpServer.createContext("/api/segment-convert", exchange -> {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(405, -1);
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            // Parse "input" field from JSON (simple extraction)
+            String input = extractJsonString(body, "input");
+            if (input == null || input.isBlank()) {
+                byte[] resp = "{\"segments\":[]}".getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, resp.length);
+                try (OutputStream os = exchange.getResponseBody()) { os.write(resp); }
+                return;
+            }
+
+            List<MozcClient.SegmentResult> segments = mozcClient.getSegments(input);
+
+            StringBuilder json = new StringBuilder("{\"segments\":[");
+            for (int i = 0; i < segments.size(); i++) {
+                if (i > 0) json.append(",");
+                var seg = segments.get(i);
+                json.append("{\"reading\":\"").append(escapeJson(seg.reading()))
+                    .append("\",\"candidates\":[");
+                for (int j = 0; j < seg.candidates().size(); j++) {
+                    if (j > 0) json.append(",");
+                    json.append("\"").append(escapeJson(seg.candidates().get(j))).append("\"");
+                }
+                json.append("]}");
+            }
+            json.append("]}");
+
+            byte[] resp = json.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, resp.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(resp); }
+        });
+
         httpServer.createContext("/api/health", exchange -> {
             byte[] resp = "{\"status\":\"ok\"}".getBytes();
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -129,6 +234,42 @@ public class PredictDaemon {
         if (httpServer != null) httpServer.stop(2);
         if (scheduler != null) scheduler.close();
         if (system != null) system.terminate();
+    }
+
+    private static Map<String, String> parseQuery(String query) {
+        Map<String, String> params = new LinkedHashMap<>();
+        if (query == null || query.isBlank()) return params;
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0) {
+                String key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                String val = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                params.put(key, val);
+            }
+        }
+        return params;
+    }
+
+    private static String escapeJson(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r");
+    }
+
+    /**
+     * Extract a string value from a simple JSON object.
+     * E.g. extractJsonString({"input":"abc","n":5}, "input") returns "abc".
+     */
+    private static String extractJsonString(String json, String key) {
+        String pattern = "\"" + key + "\"";
+        int idx = json.indexOf(pattern);
+        if (idx < 0) return null;
+        idx = json.indexOf(":", idx + pattern.length());
+        if (idx < 0) return null;
+        idx = json.indexOf("\"", idx + 1);
+        if (idx < 0) return null;
+        int end = json.indexOf("\"", idx + 1);
+        if (end < 0) return null;
+        return json.substring(idx + 1, end);
     }
 
     public static void main(String[] args) {

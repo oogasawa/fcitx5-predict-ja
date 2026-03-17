@@ -27,6 +27,7 @@ public class LlmConsoleSource {
     private final ActorRef<Analyzer> analyzer;
     private final String historyUrl;
     private final HttpClient httpClient;
+    private final ContinuationService continuationService;
 
     /**
      * Per-server count of messages seen on the last successful poll.
@@ -34,9 +35,11 @@ public class LlmConsoleSource {
      */
     private final Map<String, Integer> lastSeenCounts = new HashMap<>();
 
-    public LlmConsoleSource(ActorRef<Analyzer> analyzer, String gatewayUrl) {
+    public LlmConsoleSource(ActorRef<Analyzer> analyzer, String gatewayUrl,
+                            ContinuationService continuationService) {
         this.analyzer = analyzer;
         this.historyUrl = gatewayUrl + "/api/history?limit=200";
+        this.continuationService = continuationService;
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
@@ -83,9 +86,13 @@ public class LlmConsoleSource {
 
                 if (currentCount > lastSeen) {
                     for (int i = lastSeen; i < currentCount; i++) {
-                        String text = serverEntries.get(i).content();
+                        var entry = serverEntries.get(i);
+                        String text = entry.content();
                         if (text != null && !text.isBlank()) {
                             analyzer.tell(a -> a.analyzeRawText(text));
+                            // Feed conversation to ContinuationService for context
+                            continuationService.appendConversation(
+                                    entry.role(), text);
                             totalNew++;
                         }
                     }
@@ -97,6 +104,8 @@ public class LlmConsoleSource {
             if (totalNew > 0) {
                 LOG.info("Harvested " + totalNew + " new messages from "
                         + byServer.size() + " console(s) via gateway");
+                // Flush immediately — don't wait for batch to fill up
+                analyzer.tell(a -> a.flush());
             }
 
         } catch (Exception e) {

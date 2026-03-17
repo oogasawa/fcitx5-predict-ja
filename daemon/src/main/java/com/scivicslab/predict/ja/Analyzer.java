@@ -7,60 +7,71 @@ import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * Accumulates committed text and periodically triggers LLM enrichment.
- * Batches inputs to avoid calling the LLM on every keystroke.
+ * Analyzes raw conversation text from Gateway.
+ * Extracts candidate phrases by splitting on sentence boundaries,
+ * then delegates to LlmEnricher for filtering and consolidation.
  */
 public class Analyzer {
 
     private static final Logger LOG = Logger.getLogger(Analyzer.class.getName());
-    private static final int BATCH_SIZE = 10;
 
     private final ActorRef<LlmEnricher> enricher;
-    private final List<CommitRecord> buffer = new ArrayList<>();
+    private final List<String> candidateBuffer = new ArrayList<>();
 
     public Analyzer(ActorRef<LlmEnricher> enricher) {
         this.enricher = enricher;
     }
 
+    /**
+     * Called when user commits a conversion via IME (ime-learning mode).
+     * Stores the raw text as a candidate for LLM filtering.
+     */
     public void analyze(String reading, String output, String context) {
-        buffer.add(new CommitRecord(reading, output, context));
-
-        if (buffer.size() >= BATCH_SIZE) {
+        if (output == null || output.isBlank()) return;
+        candidateBuffer.add(output);
+        if (candidateBuffer.size() >= 10) {
             flush();
         }
     }
 
     /**
-     * Flush the buffer and send accumulated text to LlmEnricher.
-     */
-    public void flush() {
-        if (buffer.isEmpty()) return;
-
-        List<CommitRecord> batch = new ArrayList<>(buffer);
-        buffer.clear();
-
-        LOG.info("Flushing " + batch.size() + " records to enricher");
-        enricher.tell(e -> e.enrich(batch));
-    }
-
-    /**
-     * Accept raw text (e.g., from LLM Console) and queue it for enrichment.
-     * The text is treated as context for generating related phrases.
-     * No reading is available, so the direct-to-KB path in LlmEnricher
-     * will filter it out (empty reading). Only LLM-generated entries
-     * with proper reading/candidate pairs will be stored.
+     * Accept raw text (e.g., from LLM Console) and extract candidate phrases.
+     * Candidates are buffered and sent to LLM for filtering in batches.
      */
     public void analyzeRawText(String text) {
         if (text == null || text.isBlank()) return;
-        buffer.add(new CommitRecord("", text, ""));
-        if (buffer.size() >= BATCH_SIZE) {
+
+        // Split by sentence boundaries
+        String[] segments = text.split("[\\n。！？!?]+");
+
+        for (String segment : segments) {
+            String trimmed = segment.trim();
+            if (trimmed.isEmpty() || trimmed.length() < 3) continue;
+            candidateBuffer.add(trimmed);
+        }
+
+        LOG.info("Buffered " + candidateBuffer.size() + " candidates");
+
+        // Send to LLM for filtering when we have enough
+        if (candidateBuffer.size() >= 10) {
             flush();
         }
     }
 
-    public int getBufferSize() {
-        return buffer.size();
+    /**
+     * Flush buffered candidates to LLM for filtering and storage.
+     */
+    public void flush() {
+        if (candidateBuffer.isEmpty()) return;
+
+        List<String> batch = new ArrayList<>(candidateBuffer);
+        candidateBuffer.clear();
+
+        LOG.info("Sending " + batch.size() + " candidates to LLM for filtering");
+        enricher.tell(e -> e.filterAndStore(batch));
     }
 
-    public record CommitRecord(String reading, String output, String context) {}
+    public int getBufferSize() {
+        return candidateBuffer.size();
+    }
 }

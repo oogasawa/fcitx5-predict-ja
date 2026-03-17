@@ -19,7 +19,7 @@ public class EntryFilter {
     );
 
     private static final int MIN_READING_LENGTH = 2;
-    private static final int MAX_READING_LENGTH = 20;
+    private static final int MAX_READING_LENGTH = 40;
 
     /**
      * Convert katakana characters in the string to hiragana.

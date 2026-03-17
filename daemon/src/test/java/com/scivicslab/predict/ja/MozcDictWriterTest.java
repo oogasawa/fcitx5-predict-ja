@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -17,7 +16,7 @@ class MozcDictWriterTest {
 
     @Test
     void writeDictionary() throws IOException {
-        Path dictPath = tempDir.resolve("user_dict.txt");
+        Path dictPath = tempDir.resolve("user_dictionary.db");
         MozcDictWriter writer = new MozcDictWriter(dictPath.toString());
 
         List<KnowledgeBase.DictEntry> entries = List.of(
@@ -27,36 +26,45 @@ class MozcDictWriterTest {
 
         writer.writeDictionary(entries);
 
-        String content = Files.readString(dictPath);
-        assertTrue(content.contains("きょう\t今日\t名詞\tpredict"));
-        assertTrue(content.contains("てんき\t天気\t名詞\tpredict"));
-        assertTrue(content.contains("# fcitx5-predict-ja managed entries"));
-        assertTrue(content.contains("# end fcitx5-predict-ja"));
+        // Decode and verify
+        var dicts = MozcProtobufCodec.readFile(dictPath);
+        assertEquals(1, dicts.size());
+        assertEquals(MozcDictWriter.MANAGED_DICT_NAME, dicts.get(0).name());
+        assertEquals(2, dicts.get(0).entries().size());
+        assertEquals("きょう", dicts.get(0).entries().get(0).key());
+        assertEquals("今日", dicts.get(0).entries().get(0).value());
+        assertEquals("てんき", dicts.get(0).entries().get(1).key());
+        assertEquals("天気", dicts.get(0).entries().get(1).value());
     }
 
     @Test
-    void preservesUserEntries() throws IOException {
-        Path dictPath = tempDir.resolve("user_dict.txt");
+    void preservesOtherDictionaries() throws IOException {
+        Path dictPath = tempDir.resolve("user_dictionary.db");
 
-        // Write some user entries first
-        Files.writeString(dictPath, "ユーザー\tユーザー辞書\t名詞\tmanual\n");
+        // Write a user dictionary first
+        var userDict = new MozcProtobufCodec.Dictionary(12345L, "ユーザー辞書 1",
+                List.of(new MozcProtobufCodec.Entry("てすと", "テスト", "", MozcProtobufCodec.POS_NOUN)));
+        MozcProtobufCodec.writeFile(dictPath, List.of(userDict));
 
+        // Now write managed entries
         MozcDictWriter writer = new MozcDictWriter(dictPath.toString());
-        List<KnowledgeBase.DictEntry> entries = List.of(
+        writer.writeDictionary(List.of(
                 new KnowledgeBase.DictEntry("きょう", "今日", 5.0, "general")
-        );
+        ));
 
-        writer.writeDictionary(entries);
-
-        String content = Files.readString(dictPath);
-        // Both user entry and managed entry should exist
-        assertTrue(content.contains("ユーザー\tユーザー辞書\t名詞\tmanual"));
-        assertTrue(content.contains("きょう\t今日\t名詞\tpredict"));
+        // Both dictionaries should exist
+        var dicts = MozcProtobufCodec.readFile(dictPath);
+        assertEquals(2, dicts.size());
+        assertEquals("ユーザー辞書 1", dicts.get(0).name());
+        assertEquals(1, dicts.get(0).entries().size());
+        assertEquals("てすと", dicts.get(0).entries().get(0).key());
+        assertEquals(MozcDictWriter.MANAGED_DICT_NAME, dicts.get(1).name());
+        assertEquals("きょう", dicts.get(1).entries().get(0).key());
     }
 
     @Test
-    void replacesOnlyManagedSection() throws IOException {
-        Path dictPath = tempDir.resolve("user_dict.txt");
+    void replacesOnlyManagedDictionary() throws IOException {
+        Path dictPath = tempDir.resolve("user_dictionary.db");
         MozcDictWriter writer = new MozcDictWriter(dictPath.toString());
 
         // First write
@@ -69,8 +77,11 @@ class MozcDictWriterTest {
                 new KnowledgeBase.DictEntry("あした", "明日", 3.0, "general")
         ));
 
-        String content = Files.readString(dictPath);
-        assertFalse(content.contains("きょう"), "Old managed entry should be replaced");
-        assertTrue(content.contains("あした\t明日\t名詞\tpredict"));
+        var dicts = MozcProtobufCodec.readFile(dictPath);
+        assertEquals(1, dicts.size());
+        var entries = dicts.get(0).entries();
+        assertEquals(1, entries.size());
+        assertEquals("あした", entries.get(0).key());
+        assertEquals("明日", entries.get(0).value());
     }
 }

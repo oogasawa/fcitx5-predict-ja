@@ -23,7 +23,7 @@ public record DaemonConfig(
         String dataDir = stringArg(args, "--data-dir",
                 home + "/.local/share/fcitx5-predict-ja");
         String mozcUserDictPath = stringArg(args, "--mozc-dict",
-                home + "/.local/share/fcitx5/mozc/user_dict.txt");
+                home + "/.config/mozc/user_dictionary.db");
         String vllmUrl = stringArg(args, "--vllm-url",
                 "http://localhost:8000");
         String vllmModel = stringArg(args, "--vllm-model", "default");

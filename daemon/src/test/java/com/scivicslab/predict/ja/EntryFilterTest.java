@@ -71,8 +71,16 @@ class EntryFilterTest {
 
     @Test
     void rejectLongSentence() {
-        String longReading = "ひょうきもかわるようにしてもらえませんでしょうか";
-        assertNull(EntryFilter.filter(longReading, "表記も変わるようにしてもらえませんでしょうか"));
+        // 40文字超のフレーズは却下
+        String longReading = "これはよんじゅうもじをこえるながいぶんしょうなのでとうろくするひつようはまったくないとおもいます";
+        assertNull(EntryFilter.filter(longReading, "これは四十文字を超える長い文章なので登録する必要はまったくないと思います"));
+    }
+
+    @Test
+    void acceptPhraseLength() {
+        // 40文字以内のフレーズは許可
+        String phraseReading = "ひょうきもかわるようにしてもらえませんでしょうか";
+        assertNotNull(EntryFilter.filter(phraseReading, "表記も変わるようにしてもらえませんでしょうか"));
     }
 
     @Test

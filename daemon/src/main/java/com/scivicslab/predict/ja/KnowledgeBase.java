@@ -152,6 +152,36 @@ public class KnowledgeBase {
     }
 
     /**
+     * Prefix search: find entries whose reading starts with the given prefix.
+     * Returns top N results ordered by score descending.
+     */
+    public List<DictEntry> findByPrefix(String prefix, int limit) {
+        List<DictEntry> results = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT reading, candidate, score, category
+                FROM entries
+                WHERE reading LIKE ? AND score > 0.5
+                ORDER BY score DESC
+                LIMIT ?
+                """)) {
+            ps.setString(1, prefix + "%");
+            ps.setInt(2, limit);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                results.add(new DictEntry(
+                        rs.getString("reading"),
+                        rs.getString("candidate"),
+                        rs.getDouble("score"),
+                        rs.getString("category")
+                ));
+            }
+        } catch (SQLException e) {
+            LOG.warning("Failed to prefix search: " + e.getMessage());
+        }
+        return results;
+    }
+
+    /**
      * Get total number of entries.
      */
     public int getEntryCount() {
