@@ -55,7 +55,7 @@ public class PredictDaemon {
         ActorRef<QualityTracker> quality = system.actorOf("quality",
                 new QualityTracker(kbActor));
         ActorRef<Curator> curator = system.actorOf("curator",
-                new Curator(kbActor, dictWriter, config.maxDictEntries()));
+                new Curator(kbActor, dictWriter, config.maxDictEntries(), 30));
         ActorRef<LlmEnricher> enricher = system.actorOf("enricher",
                 new LlmEnricher(kbActor, config.vllmUrl(), config.vllmModel()));
         ActorRef<Analyzer> analyzer = system.actorOf("analyzer",
@@ -137,7 +137,7 @@ public class PredictDaemon {
                 var e = entries.get(i);
                 json.append("{\"reading\":\"").append(escapeJson(e.reading()))
                     .append("\",\"candidate\":\"").append(escapeJson(e.candidate()))
-                    .append("\",\"score\":").append(e.score()).append("}");
+                    .append("\"}");
             }
             json.append("]");
 

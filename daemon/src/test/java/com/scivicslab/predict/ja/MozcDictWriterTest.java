@@ -20,8 +20,8 @@ class MozcDictWriterTest {
         MozcDictWriter writer = new MozcDictWriter(dictPath.toString());
 
         List<KnowledgeBase.DictEntry> entries = List.of(
-                new KnowledgeBase.DictEntry("きょう", "今日", 5.0, "general"),
-                new KnowledgeBase.DictEntry("てんき", "天気", 3.0, "general")
+                new KnowledgeBase.DictEntry("きょう", "今日", "general"),
+                new KnowledgeBase.DictEntry("てんき", "天気", "general")
         );
 
         writer.writeDictionary(entries);
@@ -49,7 +49,7 @@ class MozcDictWriterTest {
         // Now write managed entries
         MozcDictWriter writer = new MozcDictWriter(dictPath.toString());
         writer.writeDictionary(List.of(
-                new KnowledgeBase.DictEntry("きょう", "今日", 5.0, "general")
+                new KnowledgeBase.DictEntry("きょう", "今日", "general")
         ));
 
         // Both dictionaries should exist
@@ -69,12 +69,12 @@ class MozcDictWriterTest {
 
         // First write
         writer.writeDictionary(List.of(
-                new KnowledgeBase.DictEntry("きょう", "今日", 5.0, "general")
+                new KnowledgeBase.DictEntry("きょう", "今日", "general")
         ));
 
         // Second write with different entries
         writer.writeDictionary(List.of(
-                new KnowledgeBase.DictEntry("あした", "明日", 3.0, "general")
+                new KnowledgeBase.DictEntry("あした", "明日", "general")
         ));
 
         var dicts = MozcProtobufCodec.readFile(dictPath);

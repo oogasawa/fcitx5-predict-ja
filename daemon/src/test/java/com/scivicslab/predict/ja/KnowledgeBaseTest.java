@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -25,7 +27,6 @@ class KnowledgeBaseTest {
     @AfterEach
     void tearDown() throws IOException {
         kb.close();
-        // H2 creates .mv.db and .trace.db files
         try (var files = Files.list(tempDb)) {
             files.forEach(f -> { try { Files.delete(f); } catch (IOException e) {} });
         }
@@ -37,42 +38,41 @@ class KnowledgeBaseTest {
         kb.addEntry("きょう", "今日", "ime");
         kb.addEntry("てんき", "天気", "ime");
 
-        List<KnowledgeBase.DictEntry> entries = kb.getTopEntries(10);
+        List<KnowledgeBase.DictEntry> entries = kb.getAllEntries(10);
         assertEquals(2, entries.size());
     }
 
     @Test
-    void duplicateEntryBumpsScore() {
+    void duplicateEntryIsIdempotent() {
         kb.addEntry("きょう", "今日", "ime");
         kb.addEntry("きょう", "今日", "ime"); // duplicate
 
-        List<KnowledgeBase.DictEntry> entries = kb.getTopEntries(10);
+        List<KnowledgeBase.DictEntry> entries = kb.getAllEntries(10);
         assertEquals(1, entries.size());
-        assertTrue(entries.get(0).score() > 1.0, "Score should be bumped");
     }
 
     @Test
-    void recordUseIncreasesScore() {
+    void deleteOlderThan() {
         kb.addEntry("きょう", "今日", "ime");
-        double initialScore = kb.getTopEntries(10).get(0).score();
+        kb.addEntry("てんき", "天気", "ime");
 
-        kb.recordUse("きょう", "今日");
-        double afterUse = kb.getTopEntries(10).get(0).score();
-
-        assertTrue(afterUse > initialScore);
+        // Delete entries older than far future — should delete all
+        String farFuture = Instant.now().plus(1, ChronoUnit.DAYS).toString();
+        int deleted = kb.deleteOlderThan(farFuture);
+        assertEquals(2, deleted);
+        assertEquals(0, kb.getEntryCount());
     }
 
     @Test
-    void recordIgnoreDecreasesScore() {
+    void deleteOlderThanPreservesRecent() {
         kb.addEntry("きょう", "今日", "ime");
-        // Bump score high enough that ignore won't drop below threshold
-        for (int i = 0; i < 5; i++) kb.recordUse("きょう", "今日");
-        double highScore = kb.getTopEntries(10).get(0).score();
+        kb.addEntry("てんき", "天気", "ime");
 
-        kb.recordIgnore("きょう");
-        double afterIgnore = kb.getTopEntries(10).get(0).score();
-
-        assertTrue(afterIgnore < highScore);
+        // Delete entries older than far past — should delete none
+        String farPast = Instant.now().minus(1, ChronoUnit.DAYS).toString();
+        int deleted = kb.deleteOlderThan(farPast);
+        assertEquals(0, deleted);
+        assertEquals(2, kb.getEntryCount());
     }
 
     @Test
@@ -84,11 +84,21 @@ class KnowledgeBaseTest {
     }
 
     @Test
-    void topEntriesRespectLimit() {
+    void getAllEntriesRespectLimit() {
         for (int i = 0; i < 20; i++) {
             kb.addEntry("reading" + i, "candidate" + i, "ime");
         }
-        List<KnowledgeBase.DictEntry> top5 = kb.getTopEntries(5);
+        List<KnowledgeBase.DictEntry> top5 = kb.getAllEntries(5);
         assertEquals(5, top5.size());
+    }
+
+    @Test
+    void findByPrefix() {
+        kb.addEntry("きょう", "今日", "ime");
+        kb.addEntry("きのう", "昨日", "ime");
+        kb.addEntry("てんき", "天気", "ime");
+
+        List<KnowledgeBase.DictEntry> results = kb.findByPrefix("き", 10);
+        assertEquals(2, results.size());
     }
 }

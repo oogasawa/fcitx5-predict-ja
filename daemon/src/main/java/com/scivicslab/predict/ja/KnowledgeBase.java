@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * SQLite-backed knowledge base storing all dictionary entries with scores.
+ * H2-backed knowledge base storing dictionary entries with time-based retention.
  * This actor is accessed via ActorRef to serialize all writes.
  */
 public class KnowledgeBase {
@@ -35,11 +35,7 @@ public class KnowledgeBase {
                     reading VARCHAR NOT NULL,
                     candidate VARCHAR NOT NULL,
                     category VARCHAR DEFAULT 'general',
-                    score DOUBLE DEFAULT 1.0,
-                    use_count INT DEFAULT 0,
-                    ignore_count INT DEFAULT 0,
                     created_at VARCHAR NOT NULL,
-                    last_used_at VARCHAR,
                     source VARCHAR DEFAULT 'ime',
                     CONSTRAINT uq_reading_candidate UNIQUE(reading, candidate)
                 )
@@ -48,32 +44,25 @@ public class KnowledgeBase {
                 CREATE INDEX IF NOT EXISTS idx_reading ON entries(reading)
                 """);
             stmt.execute("""
-                CREATE INDEX IF NOT EXISTS idx_score ON entries(score DESC)
+                CREATE INDEX IF NOT EXISTS idx_created_at ON entries(created_at)
                 """);
+            // Drop legacy columns/indexes if upgrading from older schema
+            try { stmt.execute("ALTER TABLE entries DROP COLUMN IF EXISTS score"); } catch (SQLException ignored) {}
+            try { stmt.execute("ALTER TABLE entries DROP COLUMN IF EXISTS use_count"); } catch (SQLException ignored) {}
+            try { stmt.execute("ALTER TABLE entries DROP COLUMN IF EXISTS ignore_count"); } catch (SQLException ignored) {}
+            try { stmt.execute("ALTER TABLE entries DROP COLUMN IF EXISTS last_used_at"); } catch (SQLException ignored) {}
+            try { stmt.execute("DROP INDEX IF EXISTS idx_score"); } catch (SQLException ignored) {}
         }
     }
 
     /**
-     * Add an entry to the knowledge base. If it already exists, bump its score.
+     * Add an entry to the knowledge base. Duplicate reading+candidate is ignored.
      */
     public void addEntry(String reading, String candidate, String source) {
         String now = Instant.now().toString();
-        // Try update first (bump score if exists)
         try (PreparedStatement ps = conn.prepareStatement("""
-                UPDATE entries SET score = score + 0.5, last_used_at = ?
-                WHERE reading = ? AND candidate = ?
-                """)) {
-            ps.setString(1, now);
-            ps.setString(2, reading);
-            ps.setString(3, candidate);
-            int updated = ps.executeUpdate();
-            if (updated > 0) return; // Existing entry bumped
-        } catch (SQLException e) {
-            LOG.warning("Failed to update entry: " + e.getMessage());
-        }
-        // Insert new entry
-        try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO entries (reading, candidate, source, created_at)
+                MERGE INTO entries (reading, candidate, source, created_at)
+                KEY (reading, candidate)
                 VALUES (?, ?, ?, ?)
                 """)) {
             ps.setString(1, reading);
@@ -87,52 +76,34 @@ public class KnowledgeBase {
     }
 
     /**
-     * Record that a candidate was used (selected by user).
+     * Delete entries older than the given cutoff.
+     * Returns the number of deleted entries.
      */
-    public void recordUse(String reading, String candidate) {
+    public int deleteOlderThan(String cutoffIso) {
         try (PreparedStatement ps = conn.prepareStatement("""
-                UPDATE entries SET
-                    use_count = use_count + 1,
-                    score = score + 1.0,
-                    last_used_at = ?
-                WHERE reading = ? AND candidate = ?
+                DELETE FROM entries WHERE created_at < ?
                 """)) {
-            ps.setString(1, Instant.now().toString());
-            ps.setString(2, reading);
-            ps.setString(3, candidate);
-            ps.executeUpdate();
+            ps.setString(1, cutoffIso);
+            int deleted = ps.executeUpdate();
+            if (deleted > 0) {
+                LOG.info("Deleted " + deleted + " entries older than " + cutoffIso);
+            }
+            return deleted;
         } catch (SQLException e) {
-            LOG.warning("Failed to record use: " + e.getMessage());
+            LOG.warning("Failed to delete old entries: " + e.getMessage());
+            return 0;
         }
     }
 
     /**
-     * Record that a candidate was ignored (not selected).
+     * Get all entries ordered by creation time (newest first).
      */
-    public void recordIgnore(String reading) {
-        try (PreparedStatement ps = conn.prepareStatement("""
-                UPDATE entries SET
-                    ignore_count = ignore_count + 1,
-                    score = GREATEST(0, score - 0.1)
-                WHERE reading = ?
-                """)) {
-            ps.setString(1, reading);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            LOG.warning("Failed to record ignore: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Get top N entries by score for promotion to the active dictionary.
-     */
-    public List<DictEntry> getTopEntries(int limit) {
+    public List<DictEntry> getAllEntries(int limit) {
         List<DictEntry> results = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement("""
-                SELECT reading, candidate, score, category
+                SELECT reading, candidate, category, created_at
                 FROM entries
-                WHERE score > 0.5
-                ORDER BY score DESC
+                ORDER BY created_at DESC
                 LIMIT ?
                 """)) {
             ps.setInt(1, limit);
@@ -141,27 +112,26 @@ public class KnowledgeBase {
                 results.add(new DictEntry(
                         rs.getString("reading"),
                         rs.getString("candidate"),
-                        rs.getDouble("score"),
                         rs.getString("category")
                 ));
             }
         } catch (SQLException e) {
-            LOG.warning("Failed to get top entries: " + e.getMessage());
+            LOG.warning("Failed to get entries: " + e.getMessage());
         }
         return results;
     }
 
     /**
      * Prefix search: find entries whose reading starts with the given prefix.
-     * Returns top N results ordered by score descending.
+     * Returns results ordered by creation time (newest first).
      */
     public List<DictEntry> findByPrefix(String prefix, int limit) {
         List<DictEntry> results = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement("""
-                SELECT reading, candidate, score, category
+                SELECT reading, candidate, category, created_at
                 FROM entries
-                WHERE reading LIKE ? AND score > 0.5
-                ORDER BY score DESC
+                WHERE reading LIKE ?
+                ORDER BY created_at DESC
                 LIMIT ?
                 """)) {
             ps.setString(1, prefix + "%");
@@ -171,7 +141,6 @@ public class KnowledgeBase {
                 results.add(new DictEntry(
                         rs.getString("reading"),
                         rs.getString("candidate"),
-                        rs.getDouble("score"),
                         rs.getString("category")
                 ));
             }
@@ -198,5 +167,5 @@ public class KnowledgeBase {
         try { conn.close(); } catch (SQLException e) { /* ignore */ }
     }
 
-    public record DictEntry(String reading, String candidate, double score, String category) {}
+    public record DictEntry(String reading, String candidate, String category) {}
 }
