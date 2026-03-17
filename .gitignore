@@ -1,0 +1,6 @@
+# Java / Maven
+daemon/target/
+daemon/dependency-reduced-pom.xml
+
+# C++ / CMake
+plugin/build/
