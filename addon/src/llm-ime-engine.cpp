@@ -854,20 +854,29 @@ private:
         panel.setAuxDown(aux);
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 
+        // Capture a weak reference to ic so we can check validity on main thread.
+        // TrackableObjectReference is not thread-safe, so we only use it
+        // inside dispatcher_.schedule callbacks (which run on the main thread).
+        auto icRef = ic->watch();
+
         // Run in background thread
-        std::thread([this, ic, context]() {
+        std::thread([this, icRef, context]() {
             try {
                 json req = {{"context", context}, {"n", 10}};
                 json resp = predictClient_.post("/api/continue", req);
 
                 // Schedule UI update on main thread
                 dispatcher_.schedule(
-                    [this, ic, resp = std::move(resp)]() {
+                    [this, icRef, resp = std::move(resp)]() {
+                        auto *ic = icRef.get();
+                        if (!ic) return;  // IC was destroyed during async request
                         showContinuationCandidates(ic, resp);
                     });
             } catch (const std::exception &) {
                 dispatcher_.schedule(
-                    [ic]() {
+                    [icRef]() {
+                        auto *ic = icRef.get();
+                        if (!ic) return;  // IC was destroyed
                         auto &panel = ic->inputPanel();
                         panel.reset();
                         ic->updateUserInterface(
