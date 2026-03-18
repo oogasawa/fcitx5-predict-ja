@@ -35,7 +35,12 @@ rm -rf target && mvn package
 
 # 3. Build the C++ addon
 cd ~/works/fcitx5-predict-ja/addon
-mkdir -p build && cd build
+rm -rf build && mkdir build && cd build
+cmake .. && make -j$(nproc)
+
+# 4. Build the C++ plugin
+cd ~/works/fcitx5-predict-ja/plugin
+rm -rf build && mkdir build && cd build
 cmake .. && make -j$(nproc)
 ```
 
@@ -43,14 +48,25 @@ cmake .. && make -j$(nproc)
 
 ### Daemon
 
-Place the JAR file wherever you like. After build it is at `daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar`.
+Place the JAR file wherever you like. After build it is at `daemon/target/fcitx5-predict-ja-1.0.0.jar`.
+
+You can also download the pre-built JAR from [GitHub Releases](https://github.com/oogasawa/fcitx5-predict-ja/releases).
 
 ### fcitx5 Addon (`llm-ime`)
 
-ビルド済みのSOファイルを`/usr/local/lib/fcitx5/`にコピーし、fcitx5をデーモンモードで再起動します。`/usr/lib/x86_64-linux-gnu/fcitx5/llm-ime.so`はここへのシンボリックリンクになっているため、コピー先は`/usr/local/lib/fcitx5/`だけで構いません。
+Copy the built `.so` file to `/usr/local/lib/fcitx5/` and restart fcitx5 in daemon mode.
 
 ```bash
-sudo cp ~/works/fcitx5-predict-ja/addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/llm-ime.so
+sudo cp addon/build/lib/llm-ime.so /usr/local/lib/fcitx5/llm-ime.so
+fcitx5 -r -d
+```
+
+Pre-built `.so` files for x86_64 and ARM (aarch64) are available on [GitHub Releases](https://github.com/oogasawa/fcitx5-predict-ja/releases).
+
+### fcitx5 Plugin (`predict-ja-notifier`)
+
+```bash
+sudo cp plugin/build/lib/predict-ja-notifier.so /usr/local/lib/fcitx5/predict-ja-notifier.so
 fcitx5 -r -d
 ```
 
@@ -58,7 +74,7 @@ fcitx5 -r -d
 
 ```bash
 # Start the daemon
-java -jar daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar \
+java -jar fcitx5-predict-ja-1.0.0.jar \
   --vllm-url http://<vllm-host>:8000 \
   --vllm-model <model-name> \
   --port 8190 \
@@ -182,3 +198,7 @@ Requires the daemon to be running.
 ```bash
 ./test-api.sh
 ```
+
+## License
+
+See [LICENSE](LICENSE) for details.
