@@ -25,8 +25,8 @@ public record DaemonConfig(
         String mozcUserDictPath = stringArg(args, "--mozc-dict",
                 home + "/.config/mozc/user_dictionary.db");
         String vllmUrl = stringArg(args, "--vllm-url",
-                "http://192.168.5.15:8000");
-        String vllmModel = stringArg(args, "--vllm-model", "Qwen3.5-35B-A3B");
+                "http://192.168.5.16:8000");
+        String vllmModel = stringArg(args, "--vllm-model", "llm-jp-3-3.7b-instruct");
         int curateInterval = intArg(args, "--curate-interval", 5);
         int maxEntries = intArg(args, "--max-dict-entries", 3000);
         String gatewayUrl = stringArg(args, "--gateway-url", "");

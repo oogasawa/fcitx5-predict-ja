@@ -81,9 +81,9 @@ public class LlmEnricher {
     String callVllm(String prompt) throws Exception {
         String escapedPrompt = escapeJson(prompt);
         String body = "{\"model\":\"" + model
-                + "\",\"chat_template_kwargs\":{\"enable_thinking\":false}"
-                + ",\"messages\":[{\"role\":\"user\",\"content\":" + escapedPrompt
-                + "}],\"max_tokens\":512,\"temperature\":0.3}";
+                + "\",\"messages\":[{\"role\":\"user\",\"content\":" + escapedPrompt
+                + "}],\"max_tokens\":512,\"temperature\":0.3"
+                + ",\"chat_template_kwargs\":{\"enable_thinking\":false}}";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(vllmUrl + "/v1/chat/completions"))

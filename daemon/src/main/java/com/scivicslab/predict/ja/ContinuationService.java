@@ -7,6 +7,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -18,14 +19,14 @@ import java.util.logging.Logger;
 public class ContinuationService {
 
     private static final Logger LOG = Logger.getLogger(ContinuationService.class.getName());
-    private static final int MAX_CONVERSATION_LENGTH = 2000;
+    private static final int MAX_CONVERSATION_MESSAGES = 20;
 
     private final String vllmUrl;
     private final String model;
     private final HttpClient httpClient;
 
-    // Rolling buffer of recent conversation from Gateway
-    private final StringBuilder conversationHistory = new StringBuilder();
+    // Rolling buffer of recent conversation messages (role + text pairs)
+    private final LinkedList<String[]> conversationMessages = new LinkedList<>();
 
     public ContinuationService(String vllmUrl, String model) {
         this.vllmUrl = vllmUrl;
@@ -39,14 +40,15 @@ public class ContinuationService {
     /**
      * Append conversation text from Gateway polling.
      * Called by LlmConsoleSource when new messages arrive.
+     * Role should be "user" or "assistant".
      */
     public synchronized void appendConversation(String role, String text) {
         if (text == null || text.isBlank()) return;
-        conversationHistory.append(role).append(": ").append(text).append("\n");
-        // Trim to keep last MAX_CONVERSATION_LENGTH chars
-        if (conversationHistory.length() > MAX_CONVERSATION_LENGTH) {
-            conversationHistory.delete(0,
-                    conversationHistory.length() - MAX_CONVERSATION_LENGTH);
+        // Normalize role to OpenAI API roles
+        String apiRole = "assistant".equalsIgnoreCase(role) ? "assistant" : "user";
+        conversationMessages.add(new String[]{apiRole, text});
+        while (conversationMessages.size() > MAX_CONVERSATION_MESSAGES) {
+            conversationMessages.removeFirst();
         }
     }
 
@@ -60,48 +62,52 @@ public class ContinuationService {
     public List<String> generate(String currentInput, int n) {
         if (currentInput == null || currentInput.isBlank()) return List.of();
 
-        String conversation;
+        List<String[]> history;
         synchronized (this) {
-            conversation = conversationHistory.toString().trim();
+            history = new ArrayList<>(conversationMessages);
         }
 
-        String prompt;
-        if (conversation.isEmpty()) {
-            prompt = String.format("""
-                    以下の文の続きを%d通り書いてください。
+        LOG.info("generate: conversation messages=" + history.size()
+                + ", input length=" + currentInput.length());
 
-                    %s
+        // Build system message with conversation history embedded as context.
+        // This avoids the user/assistant role alternation which causes LLM
+        // to generate "replies" instead of "continuations".
+        StringBuilder systemMsg = new StringBuilder();
+        systemMsg.append(String.format("""
+                You are a Japanese text prediction engine for an IME (input method).
+                Your task is to predict what a person would type NEXT as a \
+                continuation of their own sentence.
+                You are NOT answering, NOT replying, NOT responding.
+                You are completing what the person is in the middle of writing.
 
-                    ルール:
-                    - 上の文に直接つながる続きだけを書く
-                    - 上の文を繰り返さない
-                    - 各候補は異なる意図・方向性にする（例: 肯定/否定/質問/条件付き/話題転換）
-                    - 1行に1つずつ
-                    - 番号や説明は不要
-                    """, n, currentInput);
-        } else {
-            prompt = String.format("""
-                    以下はこれまでの会話です:
-                    ---
-                    %s
-                    ---
+                Rules:
+                - Output exactly %d continuation phrases
+                - Each continuation on its own line, no numbering or bullet points
+                - Never repeat what was already typed
+                - Keep each continuation under 100 characters
+                - Never output meta-commentary or category labels
+                - Do NOT answer or respond to the text
 
-                    ユーザーは今、以下の文を入力中です:
-                    %s
+                Diversity rule: each candidate must add a DIFFERENT kind of \
+                supplementary information. Vary what aspect of the situation \
+                the person elaborates on. Never mention what kind of information \
+                it is — just write the continuation naturally.""", n));
 
-                    この文の続きを%d通り書いてください。
-                    ルール:
-                    - 上の文に直接つながる続きだけを書く
-                    - 上の文を繰り返さない
-                    - 各候補は異なる意図・方向性にする（例: 肯定/否定/質問/条件付き/話題転換）
-                    - 1行に1つずつ
-                    - 番号や説明は不要
-                    """, conversation, currentInput, n);
+        if (!history.isEmpty()) {
+            systemMsg.append("\n\nRecent conversation context for reference:\n");
+            for (String[] msg : history) {
+                String speaker = "assistant".equals(msg[0]) ? "AI" : "Person";
+                systemMsg.append(speaker).append(": ")
+                        .append(msg[1]).append("\n");
+            }
         }
 
         try {
-            String response = callVllm(prompt);
+            String response = callVllmSimple(systemMsg.toString(), currentInput, n);
             List<String> results = parseResponse(response);
+            // Strip candidates that repeat the input text
+            results = stripInputRepetition(results, currentInput);
             // LLM may return more than requested; truncate to n
             return results.size() > n ? results.subList(0, n) : results;
         } catch (Exception e) {
@@ -110,20 +116,36 @@ public class ContinuationService {
         }
     }
 
-    private String callVllm(String prompt) throws Exception {
-        // Use proper JSON construction to avoid escaping issues
-        // Build JSON manually with careful escaping
+    /**
+     * Call vLLM with system + user messages only.
+     * System contains instructions + conversation history as context.
+     * User contains the text to continue, with explicit instruction.
+     */
+    private String callVllmSimple(String systemMsg,
+                                   String currentInput,
+                                   int n) throws Exception {
         String escapedModel = escapeJsonValue(model);
-        String escapedPrompt = escapeJsonValue(prompt);
+
+        String userMsg = String.format(
+                "以下のテキストの続きを%d個予測してください。"
+                + "返事や回答ではなく、この人が次に書こうとしているフレーズです:\n\n%s",
+                n, currentInput);
+
+        StringBuilder messages = new StringBuilder();
+        messages.append("{\"role\":\"system\",\"content\":\"")
+                .append(escapeJsonValue(systemMsg)).append("\"}");
+        messages.append(",{\"role\":\"user\",\"content\":\"")
+                .append(escapeJsonValue(userMsg)).append("\"}");
+
         String body = "{\"model\":\"" + escapedModel
-                + "\",\"chat_template_kwargs\":{\"enable_thinking\":false}"
-                + ",\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt
-                + "\"}],\"max_tokens\":256,\"temperature\":0.7}";
+                + "\",\"messages\":[" + messages + "]"
+                + ",\"max_tokens\":256,\"temperature\":0.7"
+                + ",\"chat_template_kwargs\":{\"enable_thinking\":false}}";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(vllmUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
-                .timeout(Duration.ofSeconds(10))
+                .timeout(Duration.ofSeconds(30))
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                 .build();
 
@@ -137,6 +159,77 @@ public class ContinuationService {
         }
 
         return extractContent(response.body());
+    }
+
+    /**
+     * Strip input text repetition from the beginning of each candidate.
+     * LLM sometimes echoes part of the user's committed context before the
+     * actual continuation. Two strategies are used:
+     *
+     * 1. Overlap detection: find the longest suffix of the context that
+     *    matches a prefix of the candidate, and remove it.
+     *    e.g. context="...技があるんですね！" candidate="技があるんですね！次は..."
+     *         -> "次は..."
+     *
+     * 2. Sentence-boundary suffix: if the candidate starts with any
+     *    substring of the context that begins after a sentence boundary
+     *    (。！？\n), strip it.
+     *    e.g. context="今日は天気が良い。散歩に行こう" candidate="散歩に行こうと思って"
+     *         -> "と思って"
+     */
+    static List<String> stripInputRepetition(List<String> candidates, String input) {
+        if (input == null || input.isBlank()) return candidates;
+        String ctx = input.trim();
+
+        List<String> cleaned = new ArrayList<>();
+        for (String candidate : candidates) {
+            String c = stripOneCandidate(candidate, ctx);
+            if (!c.isEmpty()) {
+                cleaned.add(c);
+            }
+        }
+        return cleaned;
+    }
+
+    /**
+     * Strip overlapping repetition from a single candidate.
+     */
+    static String stripOneCandidate(String candidate, String ctx) {
+        String c = candidate;
+
+        // Strategy 1: find longest suffix of ctx that matches prefix of candidate
+        int maxOverlap = Math.min(ctx.length(), c.length());
+        int overlapLen = 0;
+        for (int len = maxOverlap; len > 0; len--) {
+            if (ctx.endsWith(c.substring(0, len))) {
+                overlapLen = len;
+                break;
+            }
+        }
+        if (overlapLen > 0) {
+            c = c.substring(overlapLen).trim();
+            if (!c.isEmpty()) return c;
+            return "";
+        }
+
+        // Strategy 2: check if candidate starts with a sentence-internal fragment
+        // Collect substrings of ctx starting after each sentence boundary
+        for (int i = 0; i < ctx.length(); i++) {
+            char ch = ctx.charAt(i);
+            if (ch == '\u3002' || ch == '\uff01' || ch == '\uff1f'
+                    || ch == '.' || ch == '!' || ch == '?' || ch == '\n') {
+                if (i + 1 < ctx.length()) {
+                    String fragment = ctx.substring(i + 1).trim();
+                    if (!fragment.isEmpty() && c.startsWith(fragment)) {
+                        c = c.substring(fragment.length()).trim();
+                        if (!c.isEmpty()) return c;
+                        return "";
+                    }
+                }
+            }
+        }
+
+        return c;
     }
 
     private List<String> parseResponse(String response) {

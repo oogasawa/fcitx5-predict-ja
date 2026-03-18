@@ -379,6 +379,7 @@ private:
             ic->commitString(hiragana);
             // Track committed text for continuation
             committedContext_ += hiragana;
+            FCITX_INFO() << "Enter commit: added [" << hiragana << "] to committedContext_, total=" << committedContext_.size();
             if (committedContext_.size() > 500) {
                 committedContext_ = committedContext_.substr(
                     committedContext_.size() - 500);
@@ -842,6 +843,8 @@ private:
     // Request LLM continuation asynchronously
     void fetchContinuationAsync(InputContext *ic) {
         std::string context = committedContext_;
+        FCITX_INFO() << "fetchContinuationAsync: context length=" << context.size()
+                     << " context=[" << context << "]";
         if (context.empty()) return;
 
         // Show loading indicator
@@ -854,7 +857,7 @@ private:
         // Run in background thread
         std::thread([this, ic, context]() {
             try {
-                json req = {{"context", context}, {"n", 5}};
+                json req = {{"context", context}, {"n", 10}};
                 json resp = predictClient_.post("/api/continue", req);
 
                 // Schedule UI update on main thread
@@ -914,7 +917,7 @@ private:
         panel.reset();
 
         auto candidateList = std::make_unique<CommonCandidateList>();
-        candidateList->setPageSize(5);
+        candidateList->setPageSize(10);
         candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
         for (int i = 0; i < (int)continuationCandidates_.size(); i++) {
             std::string label = (i == continuationIndex_) ? "▶ " : "  ";
@@ -952,7 +955,7 @@ private:
             }
 
             // Fetch predictions from predict daemon (non-blocking best-effort)
-            if (utf8CharCount(hiragana) >= 5) {
+            if (utf8CharCount(hiragana) >= 4) {
                 fetchPredictions(ic, state, hiragana);
             }
         }

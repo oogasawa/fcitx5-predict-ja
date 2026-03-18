@@ -154,4 +154,199 @@ class ContinuationServiceTest {
         svc.appendConversation("user", "  ");
         // No exception
     }
+
+    // =========================================================================
+    // stripInputRepetition / stripOneCandidate tests
+    // =========================================================================
+
+    // --- Overlap detection (context suffix = candidate prefix) ---
+
+    @Test
+    void stripOverlap_exactContextEndsWithExclamation() {
+        // Context ends with "技があるんですね！", candidate echoes it
+        String ctx = "英語で指示を書くという技があるんですね！";
+        String candidate = "英語で指示を書くという技があるんですね！指示の構造を変えてみました。";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("指示の構造を変えてみました。", result);
+    }
+
+    @Test
+    void stripOverlap_partialSuffix() {
+        // Only the last part of context matches candidate start
+        String ctx = "今日は天気が良い。散歩に行こう";
+        String candidate = "散歩に行こうと思って靴を履いた";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("と思って靴を履いた", result);
+    }
+
+    @Test
+    void stripOverlap_fullContextRepeated() {
+        String ctx = "テスト";
+        String candidate = "テスト結果を確認する";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("結果を確認する", result);
+    }
+
+    @Test
+    void stripOverlap_noOverlap() {
+        String ctx = "今日は天気が良い";
+        String candidate = "明日は雨らしい";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("明日は雨らしい", result);
+    }
+
+    @Test
+    void stripOverlap_candidateIsEntirelyOverlap() {
+        // Candidate is just a repeat of context end, nothing left
+        String ctx = "テストが終わった";
+        String candidate = "テストが終わった";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("", result);
+    }
+
+    @Test
+    void stripOverlap_longContext_shortOverlap() {
+        String ctx = "これは非常に長いコンテキストです。色々なことを書きました。最後に質問";
+        String candidate = "質問があります";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("があります", result);
+    }
+
+    @Test
+    void stripOverlap_questionMark() {
+        String ctx = "これはどうですか？";
+        String candidate = "これはどうですか？具体的には";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("具体的には", result);
+    }
+
+    @Test
+    void stripOverlap_period() {
+        String ctx = "設定を変更しました。";
+        String candidate = "設定を変更しました。その結果";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("その結果", result);
+    }
+
+    // --- Sentence-boundary fragment detection ---
+
+    @Test
+    void stripFragment_afterPeriod() {
+        // Context has sentence boundary, candidate starts with fragment after it
+        String ctx = "最初の設定。次にビルドを実行";
+        String candidate = "次にビルドを実行して確認する";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("して確認する", result);
+    }
+
+    @Test
+    void stripFragment_afterExclamation() {
+        String ctx = "すごい！これで動くはず";
+        String candidate = "これで動くはずだけど確認が必要";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("だけど確認が必要", result);
+    }
+
+    @Test
+    void stripFragment_afterQuestion() {
+        String ctx = "本当に大丈夫？念のため確認";
+        String candidate = "念のため確認してみましょう";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("してみましょう", result);
+    }
+
+    @Test
+    void stripFragment_afterNewline() {
+        String ctx = "一行目\n二行目の内容";
+        String candidate = "二行目の内容を修正する";
+        String result = ContinuationService.stripOneCandidate(candidate, ctx);
+        assertEquals("を修正する", result);
+    }
+
+    // --- stripInputRepetition (list-level) ---
+
+    @Test
+    void stripList_removesEmptyCandidatesAfterStrip() {
+        String ctx = "テスト完了";
+        List<String> candidates = List.of(
+                "テスト完了",  // entirely overlap -> removed
+                "テスト完了しました",  // overlap -> "しました"
+                "別の話題"  // no overlap -> kept as-is
+        );
+        List<String> result = ContinuationService.stripInputRepetition(candidates, ctx);
+        assertEquals(2, result.size());
+        assertEquals("しました", result.get(0));
+        assertEquals("別の話題", result.get(1));
+    }
+
+    @Test
+    void stripList_nullInput() {
+        List<String> candidates = List.of("テスト");
+        List<String> result = ContinuationService.stripInputRepetition(candidates, null);
+        assertEquals(1, result.size());
+    }
+
+    @Test
+    void stripList_blankInput() {
+        List<String> candidates = List.of("テスト");
+        List<String> result = ContinuationService.stripInputRepetition(candidates, "  ");
+        assertEquals(1, result.size());
+    }
+
+    @Test
+    void stripList_realWorldCase_chatInput() {
+        // Simulating the reported bug: user typed in chat, candidate echoes it
+        String ctx = "どうかな？予測入力は...をだいぶ改善されました。英語で指示を書くという技があるんですね！";
+        List<String> candidates = List.of(
+                "英語で指示を書くという技があるんですね！指示の構造を分けてみました。",
+                "具体的にはシステムプロンプトを英語にする方法です",
+                "英語で指示を書くという技があるんですね！他にも工夫があります"
+        );
+        List<String> result = ContinuationService.stripInputRepetition(candidates, ctx);
+        assertEquals(3, result.size());
+        assertEquals("指示の構造を分けてみました。", result.get(0));
+        assertEquals("具体的にはシステムプロンプトを英語にする方法です", result.get(1));
+        assertEquals("他にも工夫があります", result.get(2));
+    }
+
+    @Test
+    void stripList_realWorldCase_incompletePhrase() {
+        // User typed an incomplete phrase, candidate continues from overlap
+        String ctx = "パソコンが動かなくなって";
+        List<String> candidates = List.of(
+                "パソコンが動かなくなってしまいました",
+                "再起動してみたけどだめでした",
+                "動かなくなって困っています"
+        );
+        List<String> result = ContinuationService.stripInputRepetition(candidates, ctx);
+        assertEquals(3, result.size());
+        assertEquals("しまいました", result.get(0));
+        assertEquals("再起動してみたけどだめでした", result.get(1));
+        assertEquals("困っています", result.get(2));
+    }
+
+    @Test
+    void stripList_multipleSentenceBoundaries() {
+        String ctx = "まず設定を確認。次にログを見る。最後にテスト";
+        List<String> candidates = List.of(
+                "最後にテストを実行する",  // overlap: "最後にテスト" matches ctx suffix
+                "全く新しい提案です"       // no overlap
+        );
+        List<String> result = ContinuationService.stripInputRepetition(candidates, ctx);
+        assertEquals(2, result.size());
+        assertEquals("を実行する", result.get(0));
+        assertEquals("全く新しい提案です", result.get(1));
+    }
+
+    @Test
+    void stripList_fragmentAfterMiddleBoundary() {
+        // Fragment after first sentence boundary matches candidate start
+        String ctx = "設定を確認。ログを見る";
+        List<String> candidates = List.of(
+                "ログを見ると原因がわかった"  // fragment "ログを見る" matches
+        );
+        List<String> result = ContinuationService.stripInputRepetition(candidates, ctx);
+        assertEquals(1, result.size());
+        assertEquals("と原因がわかった", result.get(0));
+    }
 }

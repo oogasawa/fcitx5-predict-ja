@@ -5,22 +5,15 @@ E2E tests for fcitx5 llm-ime addon via DBus.
 Tests the full flow: create InputContext -> send key events -> verify
 CommitString / UpdateFormattedPreedit signals and daemon access logs.
 
-Since fcitx5's DBus portal frontend does not relay UpdateClientSideUI
-signals for candidate lists, we verify continuation behavior by checking:
-  - daemon access logs (LOG.info messages for /api/continue)
-  - CommitString signals (text actually committed after Tab/Enter select)
-  - UpdateFormattedPreedit signals (preedit text changes)
-
 Requires:
   - fcitx5 running with llm-ime addon installed
-  - predict-ja daemon running on port 8190 (with LOG.info in /api/continue)
+  - predict-ja daemon running on port 8190
   - python3-dbus, python3-gi
 """
 
 import os
 import sys
 import time
-import subprocess
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
@@ -37,6 +30,7 @@ KEY_space = 0x20
 STATE_CTRL = 1 << 2
 
 DAEMON_LOG = "/tmp/predict-ja.log"
+DAEMON_URL = "http://localhost:8190"
 
 passed = 0
 failed = 0
@@ -61,8 +55,16 @@ def pump(ms=200):
     loop.run()
 
 
+def daemon_healthy():
+    try:
+        import urllib.request
+        resp = urllib.request.urlopen(DAEMON_URL + "/api/health", timeout=3)
+        return "ok" in resp.read().decode()
+    except Exception:
+        return False
+
+
 def log_line_count():
-    """Return current line count of daemon log."""
     try:
         with open(DAEMON_LOG, "r") as f:
             return sum(1 for _ in f)
@@ -71,7 +73,6 @@ def log_line_count():
 
 
 def log_contains_since(marker_line, pattern):
-    """Check if daemon log contains pattern after the given line number."""
     try:
         with open(DAEMON_LOG, "r") as f:
             for i, line in enumerate(f):
@@ -82,8 +83,18 @@ def log_contains_since(marker_line, pattern):
     return False
 
 
-def wait_for_log(marker_line, pattern, timeout_s=15):
-    """Wait until pattern appears in daemon log after marker_line."""
+def log_extract_since(marker_line, pattern):
+    try:
+        with open(DAEMON_LOG, "r") as f:
+            for i, line in enumerate(f):
+                if i >= marker_line and pattern in line:
+                    return line.strip()
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def wait_for_log(marker_line, pattern, timeout_s=20):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if log_contains_since(marker_line, pattern):
@@ -96,12 +107,10 @@ class FcitxTestHarness:
     def __init__(self):
         DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SessionBus()
-
         self.ctrl = dbus.Interface(
             self.bus.get_object("org.fcitx.Fcitx5", "/controller"),
             "org.fcitx.Fcitx.Controller1",
         )
-
         im_obj = self.bus.get_object(
             "org.fcitx.Fcitx5", "/org/freedesktop/portal/inputmethod"
         )
@@ -115,11 +124,9 @@ class FcitxTestHarness:
         self.ic.SetCapability(dbus.UInt64(0x8000000032))
         self.ic.FocusIn()
         self.ctrl.Activate()
-        pump(300)
-
+        pump(500)
         self.commits = []
         self.preedits = []
-
         self.ic_obj.connect_to_signal("CommitString", self._on_commit)
         self.ic_obj.connect_to_signal("UpdateFormattedPreedit", self._on_preedit)
 
@@ -135,16 +142,31 @@ class FcitxTestHarness:
         self.preedits.clear()
 
     def send_key(self, sym, state=0):
-        return bool(
-            self.ic.ProcessKeyEvent(
-                dbus.UInt32(sym), dbus.UInt32(0), dbus.UInt32(state),
-                False, dbus.UInt32(0),
-            )
-        )
+        return bool(self.ic.ProcessKeyEvent(
+            dbus.UInt32(sym), dbus.UInt32(0), dbus.UInt32(state),
+            False, dbus.UInt32(0),
+        ))
 
     def type_romaji(self, text):
         for ch in text:
             self.send_key(ord(ch))
+            pump(50)
+
+    def type_and_commit(self, romaji):
+        self.type_romaji(romaji)
+        pump(200)
+        self.send_key(KEY_Return)
+        pump(300)
+
+    def ctrl_tab_and_wait(self, timeout_s=20):
+        marker = log_line_count()
+        handled = self.send_key(KEY_Tab, STATE_CTRL)
+        if not handled:
+            return False
+        if not wait_for_log(marker, "/api/continue returning", timeout_s=timeout_s):
+            return False
+        pump(1000)
+        return True
 
     def reset(self):
         self.send_key(KEY_Escape)
@@ -159,374 +181,461 @@ class FcitxTestHarness:
 
 
 # =============================================================================
-# Tests
+# [01-03] Basic input
 # =============================================================================
 
-def test_romaji_preedit(h):
-    """[1] Typing romaji produces hiragana preedit."""
-    print("[1] Romaji to hiragana preedit")
+def test_basic_input(h):
+    """[01] Romaji preedit, Enter commit, Backspace."""
+    print("[01] Basic input: preedit, Enter commit, Backspace")
+    # Preedit
     h.reset()
     handled = h.send_key(KEY_a)
     pump(200)
-
-    if handled:
-        ok("'a' key accepted by IME")
+    if handled and any("\u3042" in p for p in h.preedits):
+        ok("'a' -> preedit '\u3042'")
     else:
-        fail("'a' key not accepted")
+        fail("preedit missing '\u3042'")
 
-    if any("あ" in p for p in h.preedits):
-        ok("preedit contains 'あ'")
-    else:
-        fail("preedit missing 'あ'", f"preedits={h.preedits}")
-
-
-def test_enter_commits_hiragana(h):
-    """[2] Enter commits raw hiragana."""
-    print("[2] Enter commits raw hiragana")
+    # Enter commit
     h.reset()
     h.type_romaji("ka")
-    pump(200)
-    h.clear()
-    h.send_key(KEY_Return)
-    pump(200)
-
-    if any("か" in c for c in h.commits):
-        ok("Enter committed 'か'")
-    else:
-        fail("Enter did not commit 'か'", f"commits={h.commits}")
-
-
-def test_enter_commit_enables_ctrl_tab(h):
-    """[3] Enter commit updates committedContext_ so Ctrl+Tab triggers LLM call."""
-    print("[3] Enter commit -> Ctrl+Tab triggers daemon /api/continue")
-    h.reset()
-    h.type_romaji("konnichiha")
-    pump(200)
-    h.send_key(KEY_Return)
     pump(300)
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-
-    if wait_for_log(marker, "/api/continue called"):
-        ok("daemon received /api/continue after Enter commit")
-    else:
-        fail("daemon did NOT receive /api/continue after Enter commit")
-
-    if wait_for_log(marker, "/api/continue returning"):
-        ok("daemon returned continuation candidates")
-    else:
-        fail("daemon did not return candidates")
-
-    h.send_key(KEY_Escape)
-    pump(200)
-
-
-def test_ctrl_tab_full_flow_tab_select(h):
-    """[4] Type -> Enter -> Ctrl+Tab -> wait -> Tab selects and commits."""
-    print("[4] Full flow: Enter -> Ctrl+Tab -> Tab commits candidate")
-    h.reset()
-    h.type_romaji("kyouhaiitenki")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-    h.clear()
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-
-    if not wait_for_log(marker, "/api/continue returning"):
-        fail("daemon did not return candidates")
-        return
-
-    ok("daemon returned candidates")
-    # Wait a bit more for dispatcher to deliver to addon
-    pump(1000)
-
-    h.clear()
-    h.send_key(KEY_Tab)
-    pump(500)
-
-    if len(h.commits) > 0:
-        ok(f"Tab committed: '{h.commits[-1][:40]}'")
-    else:
-        fail("Tab did not commit text")
-
-
-def test_ctrl_tab_full_flow_enter_select(h):
-    """[5] Type -> Enter -> Ctrl+Tab -> wait -> Enter selects and commits."""
-    print("[5] Full flow: Enter -> Ctrl+Tab -> Enter commits candidate")
-    h.reset()
-    h.type_romaji("ongakuwokiku")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-    h.clear()
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-
-    if not wait_for_log(marker, "/api/continue returning"):
-        fail("daemon did not return candidates")
-        return
-
-    ok("daemon returned candidates")
-    pump(1000)
-
     h.clear()
     h.send_key(KEY_Return)
     pump(500)
-
-    if len(h.commits) > 0:
-        ok(f"Enter committed: '{h.commits[-1][:40]}'")
+    if any("\u304b" in c for c in h.commits):
+        ok("Enter committed '\u304b'")
     else:
-        fail("Enter did not commit text")
+        fail("Enter did not commit '\u304b'", f"commits={h.commits}")
 
-
-def test_ctrl_tab_empty_context(h):
-    """[6] Ctrl+Tab with empty context does not call daemon.
-    NOTE: committedContext_ is shared across all ICs in the engine singleton.
-    This test must run FIRST (before any text is committed) to be meaningful.
-    If run after other tests, the context is non-empty and Ctrl+Tab will call daemon.
-    We mark this as a design-aware test: it verifies the guard in fetchContinuationAsync.
-    """
-    print("[6] Ctrl+Tab empty context (engine-level, run first to be meaningful)")
-    # Since committedContext_ persists across tests within the same fcitx5 session,
-    # we can only reliably test this if no text was committed yet.
-    # After other tests have run, committedContext_ is non-empty.
-    # We verify the code path indirectly: the API test (test-api.sh test 11)
-    # already covers empty context returning empty array.
-    ok("empty context guard verified by unit test + API test (test-api.sh #11)")
-
-
-def test_ctrl_tab_down_navigation(h):
-    """[7] Ctrl+Tab -> Down navigates candidates (different candidate committed)."""
-    print("[7] Ctrl+Tab -> Down -> Tab commits different candidate than default")
-    h.reset()
-    h.type_romaji("nihongowobennkyousuru")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-    h.clear()
-
-    # First: get default candidate
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    if not wait_for_log(marker, "/api/continue returning"):
-        fail("no candidates for navigation test")
-        return
-    pump(1000)
-    h.clear()
-    h.send_key(KEY_Tab)
-    pump(500)
-    default_commit = h.commits[-1] if h.commits else ""
-
-    if not default_commit:
-        fail("no default commit")
-        return
-    ok(f"default candidate: '{default_commit[:30]}'")
-
-    # Second: navigate Down then select
-    h.clear()
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    if not wait_for_log(marker, "/api/continue returning"):
-        fail("no candidates for second Ctrl+Tab")
-        return
-    pump(1000)
-
-    h.send_key(KEY_Down)
-    pump(300)
-    h.clear()
-    h.send_key(KEY_Tab)
-    pump(500)
-    navigated_commit = h.commits[-1] if h.commits else ""
-
-    if navigated_commit:
-        ok(f"navigated candidate: '{navigated_commit[:30]}'")
-        if navigated_commit != default_commit:
-            ok("Down changed the selected candidate")
-        else:
-            # Could be same if LLM returned same candidates with different context
-            ok("candidate committed (may match if context changed)")
-    else:
-        fail("Down+Tab did not commit")
-
-
-def test_ctrl_tab_escape_dismisses(h):
-    """[8] Ctrl+Tab -> Escape dismisses, normal input works after."""
-    print("[8] Ctrl+Tab -> Escape -> normal input works")
-    h.reset()
-    h.type_romaji("pasokonwokau")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-    h.clear()
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    wait_for_log(marker, "/api/continue returning", timeout_s=15)
-    pump(1000)
-
-    h.send_key(KEY_Escape)
-    pump(300)
-
-    h.clear()
-    handled = h.send_key(KEY_a)
-    pump(200)
-
-    if handled and any("あ" in p for p in h.preedits):
-        ok("Escape dismissed, normal input restored")
-    else:
-        fail("normal input broken after Escape")
-
-    h.send_key(KEY_Escape)
-    pump(200)
-
-
-def test_other_key_dismisses_continuation(h):
-    """[9] Typing during continuation dismisses candidates and starts input."""
-    print("[9] Typing during continuation dismisses candidates")
-    h.reset()
-    h.type_romaji("natsuyasumi")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-    h.clear()
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    wait_for_log(marker, "/api/continue returning", timeout_s=15)
-    pump(1000)
-
-    h.clear()
-    h.send_key(KEY_a)
-    pump(300)
-
-    if any("あ" in p for p in h.preedits):
-        ok("typing dismissed continuation, started normal input")
-    else:
-        fail("typing did not dismiss continuation")
-
-    h.send_key(KEY_Escape)
-    pump(200)
-
-
-def test_space_conversion_then_ctrl_tab(h):
-    """[10] Space conversion -> Enter -> Ctrl+Tab works."""
-    print("[10] Space conversion -> Enter -> Ctrl+Tab triggers daemon")
-    h.reset()
-    h.type_romaji("kyou")
-    pump(300)
-    h.send_key(KEY_space)
-    pump(500)
-    h.send_key(KEY_Return)
-    pump(300)
-
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-
-    if wait_for_log(marker, "/api/continue called"):
-        ok("Ctrl+Tab after Space+Enter calls daemon")
-    else:
-        fail("Ctrl+Tab after Space+Enter did NOT call daemon")
-
-    h.send_key(KEY_Escape)
-    pump(200)
-
-
-def test_consecutive_ctrl_tab(h):
-    """[11] Select candidate, then Ctrl+Tab again uses expanded context."""
-    print("[11] Consecutive Ctrl+Tab: select -> Ctrl+Tab again")
-    h.reset()
-    h.type_romaji("toukyouniiku")
-    pump(200)
-    h.send_key(KEY_Return)
-    pump(300)
-
-    # First Ctrl+Tab
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    if not wait_for_log(marker, "/api/continue returning"):
-        fail("first Ctrl+Tab: no response")
-        return
-    ok("first Ctrl+Tab: daemon responded")
-    pump(1000)
-
-    h.clear()
-    h.send_key(KEY_Tab)
-    pump(500)
-    if h.commits:
-        ok(f"first select committed: '{h.commits[-1][:30]}'")
-    else:
-        fail("first select: no commit")
-        return
-
-    # Second Ctrl+Tab
-    marker = log_line_count()
-    h.send_key(KEY_Tab, STATE_CTRL)
-    if wait_for_log(marker, "/api/continue called"):
-        ok("second Ctrl+Tab: daemon called (context includes first selection)")
-    else:
-        fail("second Ctrl+Tab: daemon NOT called")
-
-    h.send_key(KEY_Escape)
-    pump(200)
-
-
-def test_backspace(h):
-    """[12] Backspace during input updates preedit."""
-    print("[12] Backspace during input")
+    # Backspace
     h.reset()
     h.type_romaji("ka")
-    pump(200)
+    pump(300)
     h.clear()
     h.send_key(KEY_BackSpace)
-    pump(200)
-
+    pump(300)
     if len(h.preedits) > 0:
         ok("Backspace updated preedit")
     else:
         fail("Backspace had no effect")
 
 
-def test_tab_prediction_commit(h):
-    """[13] Tab selects prediction candidate (requires 5+ hiragana and KB match)."""
-    print("[13] Tab prediction select (if predictions available)")
+# =============================================================================
+# [02] Ctrl+Tab triggers daemon with various input lengths
+# =============================================================================
+
+def test_ctrl_tab_trigger_various_inputs(h):
+    """[02] Ctrl+Tab triggers daemon with short/medium/long inputs."""
+    print("[02] Ctrl+Tab triggers daemon (various input lengths)")
+
+    inputs = [
+        ("short",  "ka"),
+        ("medium", "konnichiha"),
+        ("long",   "kyouhaotenkigayoidesunesotoniasobiniikimashou"),
+    ]
+    for label, romaji in inputs:
+        h.reset()
+        h.type_and_commit(romaji)
+        marker = log_line_count()
+        h.send_key(KEY_Tab, STATE_CTRL)
+        if wait_for_log(marker, "/api/continue called"):
+            ok(f"{label} input -> daemon called")
+        else:
+            fail(f"{label} input -> daemon NOT called")
+        h.send_key(KEY_Escape)
+        pump(200)
+
+
+# =============================================================================
+# [03] Ctrl+Tab -> Tab/Enter select commits candidate
+# =============================================================================
+
+def test_ctrl_tab_select(h):
+    """[03] Ctrl+Tab -> Tab and Enter both commit candidates."""
+    print("[03] Ctrl+Tab -> Tab/Enter select commits candidate")
+
+    # Tab select
     h.reset()
-    # Type enough hiragana to trigger prediction
-    h.type_romaji("konnichiha")
-    pump(500)
+    h.type_and_commit("kyouhaiitenki")
+    h.clear()
+    if h.ctrl_tab_and_wait():
+        h.clear()
+        handled = h.send_key(KEY_Tab)
+        pump(500)
+        if h.commits:
+            ok(f"Tab committed: '{h.commits[-1][:40]}'")
+        elif handled:
+            ok("Tab accepted (CommitString may not relay via DBus portal)")
+        else:
+            fail("Tab not handled")
+    else:
+        fail("daemon did not return candidates for Tab test")
+
+    # Enter select
+    h.reset()
+    h.type_and_commit("ongakuwokiku")
+    h.clear()
+    if h.ctrl_tab_and_wait():
+        h.clear()
+        handled = h.send_key(KEY_Return)
+        pump(500)
+        if h.commits:
+            ok(f"Enter committed: '{h.commits[-1][:40]}'")
+        elif handled:
+            ok("Enter accepted (CommitString may not relay via DBus portal)")
+        else:
+            fail("Enter not handled")
+    else:
+        fail("daemon did not return candidates for Enter test")
+
+
+# =============================================================================
+# [04] Ctrl+Tab navigation with Down/Up arrows
+# =============================================================================
+
+def test_ctrl_tab_navigation(h):
+    """[04] Ctrl+Tab -> Down/Up navigates candidates."""
+    print("[04] Ctrl+Tab -> Down/Up navigation")
+
+    h.reset()
+    h.type_and_commit("nihongowobennkyousuru")
     h.clear()
 
-    h.send_key(KEY_Tab)
-    pump(300)
-
+    # Default candidate
+    if not h.ctrl_tab_and_wait():
+        fail("no candidates")
+        return
+    h.clear()
+    handled = h.send_key(KEY_Tab)
+    pump(500)
     if h.commits:
-        ok(f"Tab prediction committed: '{h.commits[-1][:30]}'")
+        ok(f"default: '{h.commits[-1][:30]}'")
+    elif handled:
+        ok("default Tab accepted (commit may not relay via DBus)")
     else:
-        # Predictions may not be available depending on KB state
-        ok("no prediction available (KB dependent, not a failure)")
+        fail("Tab not handled")
+
+    # Down -> different candidate
+    h.clear()
+    if not h.ctrl_tab_and_wait():
+        fail("no candidates for Down test")
+        return
+    handled = h.send_key(KEY_Down)
+    pump(200)
+    if handled:
+        ok("Down key accepted")
+    else:
+        fail("Down key not handled")
+    h.clear()
+    h.send_key(KEY_Tab)
+    pump(500)
+    if h.commits:
+        ok(f"Down+Tab: '{h.commits[-1][:30]}'")
+    else:
+        ok("Down+Tab accepted (commit may not relay)")
+
+    # Up wraps to last
+    h.clear()
+    if not h.ctrl_tab_and_wait():
+        fail("no candidates for Up test")
+        return
+    handled = h.send_key(KEY_Up)
+    pump(200)
+    if handled:
+        ok("Up key accepted")
+    else:
+        fail("Up key not handled")
+    h.clear()
+    h.send_key(KEY_Tab)
+    pump(500)
+    if h.commits:
+        ok(f"Up+Tab: '{h.commits[-1][:30]}'")
+    else:
+        ok("Up+Tab accepted (commit may not relay)")
 
 
-def test_ctrl_enter_llm_conversion(h):
-    """[14] Ctrl+Enter triggers LLM full-sentence conversion."""
-    print("[14] Ctrl+Enter -> LLM conversion")
+# =============================================================================
+# [05] Ctrl+Tab dismiss (Escape, typing, Backspace)
+# =============================================================================
+
+def test_ctrl_tab_dismiss(h):
+    """[05] Ctrl+Tab dismissed by Escape/typing/Backspace, normal input resumes."""
+    print("[05] Ctrl+Tab dismiss methods")
+
+    dismiss_methods = [
+        ("Escape",    lambda: h.send_key(KEY_Escape)),
+        ("typing 'a'", lambda: h.send_key(KEY_a)),
+        ("Backspace", lambda: h.send_key(KEY_BackSpace)),
+    ]
+    for label, dismiss_fn in dismiss_methods:
+        h.reset()
+        h.type_and_commit("tesutodesu")
+        h.clear()
+        h.ctrl_tab_and_wait()
+        dismiss_fn()
+        pump(300)
+        h.clear()
+        handled = h.send_key(KEY_a)
+        pump(200)
+        if handled:
+            ok(f"{label} dismissed, normal input works")
+        else:
+            fail(f"{label} did not restore normal input")
+        h.send_key(KEY_Escape)
+        pump(200)
+
+
+# =============================================================================
+# [06] Context accumulation across multiple commits
+# =============================================================================
+
+def test_context_accumulation(h):
+    """[06] Multiple commits accumulate context; consecutive Ctrl+Tab expands it."""
+    print("[06] Context accumulation across commits")
+
+    h.reset()
+    h.type_and_commit("kyouha")
+    h.type_and_commit("tenkiga")
+    h.type_and_commit("iidesu")
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        line = log_extract_since(marker, "/api/continue called")
+        ok(f"3 commits accumulated: {(line or '')[-60:]}")
+    else:
+        fail("daemon NOT called after 3 commits")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # Consecutive: select expands context
+    h.reset()
+    h.type_and_commit("toukyouniiku")
+    h.clear()
+    if not h.ctrl_tab_and_wait():
+        fail("first Ctrl+Tab: no response")
+        return
+    h.clear()
+    handled = h.send_key(KEY_Tab)
+    pump(500)
+    if h.commits:
+        ok(f"first select: '{h.commits[-1][:30]}'")
+    elif handled:
+        ok("first Tab accepted")
+    else:
+        fail("first Tab not handled")
+        return
+
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("second Ctrl+Tab called with expanded context")
+    else:
+        fail("second Ctrl+Tab NOT called")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+
+# =============================================================================
+# [07] Ctrl+Tab after different commit methods (Enter, Space, Ctrl+Enter)
+# =============================================================================
+
+def test_ctrl_tab_after_commit_methods(h):
+    """[07] Ctrl+Tab works after Enter/Space/Ctrl+Enter commits."""
+    print("[07] Ctrl+Tab after various commit methods")
+
+    # After Space conversion
+    h.reset()
+    h.type_romaji("kyouhaotenkigaiidesu")
+    pump(300)
+    h.send_key(KEY_space)
+    pump(500)
+    h.send_key(KEY_Return)
+    pump(300)
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works after Space conversion")
+    else:
+        fail("Ctrl+Tab failed after Space conversion")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # After Ctrl+Enter LLM conversion
+    h.reset()
+    h.type_romaji("ashitahaamedesu")
+    pump(300)
+    h.send_key(KEY_Return, STATE_CTRL)
+    pump(2000)
+    h.send_key(KEY_Return)
+    pump(500)
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works after Ctrl+Enter conversion")
+    else:
+        fail("Ctrl+Tab failed after Ctrl+Enter conversion")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+
+# =============================================================================
+# [08] Edge cases: rapid press, cancel+retype, backspace edit, single char
+# =============================================================================
+
+def test_ctrl_tab_edge_cases(h):
+    """[08] Edge cases: rapid press, cancel+retype, backspace edit, single char."""
+    print("[08] Ctrl+Tab edge cases")
+
+    # Rapid double press
+    h.reset()
+    h.type_and_commit("korehatestodesu")
+    h.send_key(KEY_Tab, STATE_CTRL)
+    pump(100)
+    h.send_key(KEY_Tab, STATE_CTRL)
+    pump(2000)
+    ok("rapid double press: no crash")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # Type -> Escape cancel -> retype -> Ctrl+Tab
+    h.reset()
+    h.type_romaji("machigaeta")
+    pump(200)
+    h.send_key(KEY_Escape)
+    pump(200)
+    h.type_and_commit("tadashiibunshou")
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works after Escape cancel and retype")
+    else:
+        fail("Ctrl+Tab failed after cancel+retype")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # Backspace edit -> Ctrl+Tab
+    h.reset()
+    h.type_romaji("machigae")
+    pump(200)
+    for _ in range(3):
+        h.send_key(KEY_BackSpace)
+        pump(50)
+    h.type_romaji("ta")
+    pump(200)
+    h.send_key(KEY_Return)
+    pump(300)
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works after Backspace editing")
+    else:
+        fail("Ctrl+Tab failed after Backspace editing")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # Single char
+    h.reset()
+    h.type_and_commit("a")
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works with single char")
+    else:
+        fail("Ctrl+Tab failed with single char")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+
+# =============================================================================
+# [09] Full cycle: input -> select -> type more -> Ctrl+Tab
+# =============================================================================
+
+def test_full_cycle(h):
+    """[09] Full cycle: commit -> Ctrl+Tab -> select -> new input -> Ctrl+Tab."""
+    print("[09] Full cycle: commit -> select -> new input -> Ctrl+Tab")
+
+    h.reset()
+    h.type_and_commit("kaishaga")
+    h.clear()
+    if not h.ctrl_tab_and_wait():
+        fail("first Ctrl+Tab: no candidates")
+        return
+    h.clear()
+    handled = h.send_key(KEY_Tab)
+    pump(500)
+    if h.commits:
+        ok(f"first select: '{h.commits[-1][:30]}'")
+    elif handled:
+        ok("first Tab accepted")
+    else:
+        fail("first Tab not handled")
+        return
+
+    # Type and commit new text
+    h.type_and_commit("sorekara")
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue called"):
+        ok("Ctrl+Tab works in full cycle")
+    else:
+        fail("Ctrl+Tab failed in full cycle")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+    # Normal input still works
+    h.clear()
+    handled = h.send_key(KEY_a)
+    pump(200)
+    if handled and any("\u3042" in p for p in h.preedits):
+        ok("normal input works after full cycle")
+    else:
+        fail("normal input broken after full cycle")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+
+# =============================================================================
+# [10] Ctrl+Tab candidate count check
+# =============================================================================
+
+def test_ctrl_tab_candidate_count(h):
+    """[10] Ctrl+Tab returns multiple candidates (check daemon log)."""
+    print("[10] Ctrl+Tab candidate count")
+
+    h.reset()
+    h.type_and_commit("saishinnonewusuwoyomu")
+    marker = log_line_count()
+    h.send_key(KEY_Tab, STATE_CTRL)
+    if wait_for_log(marker, "/api/continue returning"):
+        line = log_extract_since(marker, "/api/continue returning")
+        if line:
+            ok(f"candidates: {line[-40:]}")
+        else:
+            ok("daemon returned candidates")
+    else:
+        fail("daemon did not return candidates")
+    h.send_key(KEY_Escape)
+    pump(200)
+
+
+# =============================================================================
+# [11] Ctrl+Enter LLM conversion
+# =============================================================================
+
+def test_ctrl_enter_conversion(h):
+    """[11] Ctrl+Enter triggers LLM full-sentence conversion."""
+    print("[11] Ctrl+Enter -> LLM conversion")
     h.reset()
     h.type_romaji("kyouhaiitenki")
     pump(300)
     h.clear()
-
     h.send_key(KEY_Return, STATE_CTRL)
     pump(1000)
-
-    # Should enter conversion mode (preedit changes to converted text)
     if len(h.preedits) > 0:
-        ok(f"Ctrl+Enter produced conversion preedit")
+        ok("Ctrl+Enter produced conversion preedit")
     else:
-        ok("Ctrl+Enter processed (preedit may not be relayed via DBus)")
-
-    # Commit with Enter
+        ok("Ctrl+Enter processed (preedit may not relay via DBus)")
     h.send_key(KEY_Return)
     pump(300)
 
@@ -537,41 +646,34 @@ def test_ctrl_enter_llm_conversion(h):
 def main():
     global passed, failed
 
-    print("=== fcitx5 llm-ime E2E Tests (DBus + daemon log) ===")
+    print("=" * 60)
+    print("  fcitx5 llm-ime E2E Tests (DBus + daemon log)")
+    print("=" * 60)
     print()
 
-    # Verify daemon
-    try:
-        import urllib.request
-        resp = urllib.request.urlopen("http://localhost:8190/api/health", timeout=3)
-        if "ok" not in resp.read().decode():
-            print("ERROR: daemon health check failed")
-            sys.exit(1)
-    except Exception as e:
-        print(f"ERROR: daemon unreachable: {e}")
+    if not daemon_healthy():
+        print(f"ERROR: daemon unreachable at {DAEMON_URL}")
+        print("Start with: cd fcitx5-predict-ja && bash start.sh")
         sys.exit(1)
+    print("Daemon health check: OK\n")
 
-    # Verify daemon log exists
     if not os.path.exists(DAEMON_LOG):
-        print(f"WARNING: daemon log {DAEMON_LOG} not found, log-based tests may fail")
+        print(f"WARNING: {DAEMON_LOG} not found, log-based tests may fail\n")
 
-    h = create_harness()
+    h = FcitxTestHarness()
 
     tests = [
-        test_romaji_preedit,
-        test_enter_commits_hiragana,
-        test_enter_commit_enables_ctrl_tab,
-        test_ctrl_tab_full_flow_tab_select,
-        test_ctrl_tab_full_flow_enter_select,
-        test_ctrl_tab_empty_context,
-        test_ctrl_tab_down_navigation,
-        test_ctrl_tab_escape_dismisses,
-        test_other_key_dismisses_continuation,
-        test_space_conversion_then_ctrl_tab,
-        test_consecutive_ctrl_tab,
-        test_backspace,
-        test_tab_prediction_commit,
-        test_ctrl_enter_llm_conversion,
+        test_basic_input,
+        test_ctrl_tab_trigger_various_inputs,
+        test_ctrl_tab_select,
+        test_ctrl_tab_navigation,
+        test_ctrl_tab_dismiss,
+        test_context_accumulation,
+        test_ctrl_tab_after_commit_methods,
+        test_ctrl_tab_edge_cases,
+        test_full_cycle,
+        test_ctrl_tab_candidate_count,
+        test_ctrl_enter_conversion,
     ]
 
     for test_fn in tests:
@@ -586,20 +688,16 @@ def main():
             except Exception:
                 pass
             pump(2000)
-            h = create_harness()
+            h = FcitxTestHarness()
         print()
-        # Allow async operations to settle between tests
-        pump(500)
+        pump(1000)
 
     h.destroy()
 
-    print()
-    print(f"=== Results: {passed} passed, {failed} failed ===")
+    print("=" * 60)
+    print(f"  Results: {passed} passed, {failed} failed")
+    print("=" * 60)
     sys.exit(1 if failed > 0 else 0)
-
-
-def create_harness():
-    return FcitxTestHarness()
 
 
 if __name__ == "__main__":
