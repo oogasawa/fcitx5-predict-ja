@@ -5,3 +5,6 @@ daemon/dependency-reduced-pom.xml
 # C++ / CMake
 plugin/build/
 addon/build/
+static-html/
+search-index/
+search-embedding/
