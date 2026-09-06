@@ -7,8 +7,8 @@ VLLM_MODEL="Qwen3.5-35B-A3B"
 GATEWAY_URL="http://localhost:8888"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JA_JAR="$SCRIPT_DIR/daemon/target/fcitx5-predict-ja-0.1.0-SNAPSHOT.jar"
-EN_JAR="$(dirname "$SCRIPT_DIR")/fcitx5-predict-en/daemon/target/fcitx5-predict-en-0.1.0-SNAPSHOT.jar"
+JA_JAR="$SCRIPT_DIR/daemon/target/fcitx5-predict-ja-1.0.0-shaded.jar"
+EN_JAR="$(dirname "$SCRIPT_DIR")/fcitx5-predict-en/daemon/target/fcitx5-predict-en-0.1.0-SNAPSHOT-shaded.jar"
 
 # Stop existing daemons
 for port in 8190 8191; do
